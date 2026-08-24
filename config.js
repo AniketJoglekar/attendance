@@ -15,10 +15,12 @@ window.PASS_CONFIG = {
   // e.g. https://iitt-gac.github.io  (no path, no trailing slash).
   CLIENT_ID: 'PASTE_YOUR_CLIENT_ID.apps.googleusercontent.com',
 
-  // Must match EVENT_CODE at the top of Code.gs. Lets the scanner read a roll number
-  // off a pass with no network, so the volunteer sees it instantly.
+  // Must match EVENT_CODE at the top of 00_Config.gs. Lets the scanner read a roll number
+  // off a pass with no network, so the volunteer sees it instantly, and makes the scanner
+  // refuse to start if the site and the backend are set to different semesters.
   EVENT_CODE: 'IITT-2026ODD',
 
+  // Shown on the sign-in screen only.
   EVENT_NAME: 'IIT Tirupati — Class Attendance',
 
   // Milliseconds between decode attempts. Lower is faster and hotter on the battery.

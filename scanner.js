@@ -1,10 +1,28 @@
 /**
  * Period Pass — scanner client
  *
+ * Runs as a static page on GitHub Pages, not inside Apps Script. That matters: an
+ * HtmlService page lives in an iframe whose origin changes on every load, which Google
+ * Identity Services cannot be registered against and which makes the browser re-ask for
+ * camera permission every session. A fixed Pages origin fixes both.
+ *
+ * It talks to the backend over a single cross-origin POST with Content-Type text/plain, so
+ * the request stays "simple" and skips the CORS preflight — Apps Script cannot answer an
+ * OPTIONS call.
+ *
  * Offline-first. Every decode is written to a local queue and shown immediately using the
  * roll number read out of the pass itself; the server verifies signature, roll and
  * duplicates when the queue drains. A dead network delays verification, it does not lose
  * the scan.
+ *
+ * Shape of this file:
+ *   local queue        localStorage, purged at 36 hours because items hold live passes
+ *   Google sign-in     GIS ID token, renewed by hand when the hour is up
+ *   server calls       one POST helper, with a timeout and a clock-offset measurement
+ *   draining           batches of up to 50, results matched back by id
+ *   class picker       only when several courses share a slot
+ *   camera and decode  BarcodeDetector where available, jsQR everywhere else
+ *   verdict card       roll number first; the photo loads only when asked for
  */
 (function () {
   'use strict';
