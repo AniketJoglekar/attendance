@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0B0F14">
+<meta name="referrer" content="strict-origin">
+<title>Period Pass — Scanner</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0B0F14; --surface:#151C24; --line:#26313D;
+    --text:#EAF0F6; --muted:#8A9AAB; --maroon:#7A1030;
+    --allow:#1FB574; --warn:#E0A02A; --refuse:#E0453B; --pending:#5B93CF;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;overscroll-behavior:none}
+  body{
+    background:var(--ink);color:var(--text);
+    font-family:'Space Grotesk',system-ui,-apple-system,sans-serif;
+    display:flex;flex-direction:column;overflow:hidden;
+    padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  .hidden{display:none!important}
+  button{font-family:inherit;font-size:inherit}
+  :focus-visible{outline:2px solid var(--allow);outline-offset:2px}
+
+  /* ---------- sign-in ---------- */
+  #signin{flex:1;display:flex;flex-direction:column;justify-content:center;padding:32px 26px}
+  #signin .rule{width:44px;height:4px;background:var(--maroon);border-radius:2px;margin-bottom:18px}
+  #signin h1{font-size:27px;font-weight:700;line-height:1.15;margin:0}
+  #signin p{font-size:15px;color:var(--muted);line-height:1.5;margin:8px 0 26px}
+  #gsiButton{min-height:44px}
+  #signinError{color:var(--refuse);font-size:14px;line-height:1.5;margin-top:18px}
+
+  /* ---------- banner ---------- */
+  #banner{font-size:13px;font-weight:500;padding:9px 14px;text-align:center;display:none;flex:0 0 auto}
+  #banner.show{display:block}
+  #banner.alarm{background:var(--refuse);color:#fff}
+  #banner.caution{background:var(--warn);color:#141A21}
+  #banner.sticky{font-weight:700;cursor:pointer}
+
+  /* ---------- header ---------- */
+  header{display:flex;align-items:center;gap:10px;padding:10px 14px;
+    background:var(--surface);border-bottom:1px solid var(--line);flex:0 0 auto}
+  .brand{width:4px;height:34px;background:var(--maroon);border-radius:2px;flex:0 0 auto}
+  .hgroup{min-width:0;flex:1}
+  .period{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    background:none;border:none;color:inherit;padding:0;text-align:left;width:100%}
+  .period.none{color:var(--warn)}
+  .period.pick{color:var(--pending)}
+  .period.pick::after{content:' ▾'}
+  .tally{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+  .count{font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
+    color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+  .queued{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--pending)}
+  .sub{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  /* ---------- camera ---------- */
+  #stage{position:relative;flex:1 1 auto;min-height:0;background:#000;overflow:hidden}
+  #video{width:100%;height:100%;object-fit:cover;display:block}
+  #frame{position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(ellipse 74% 42% at 50% 46%,transparent 0 99%,rgba(0,0,0,.55) 100%)}
+  .hint{position:absolute;left:0;right:0;bottom:10px;text-align:center;font-size:12px;
+    color:var(--muted);pointer-events:none;text-shadow:0 1px 3px rgba(0,0,0,.9);padding:0 16px}
+  .camtools{position:absolute;top:10px;right:10px;display:flex;gap:8px}
+  .camtools button{background:rgba(11,15,20,.72);border:1px solid var(--line);color:var(--text);
+    font-size:12px;font-weight:500;padding:8px 11px;border-radius:8px;backdrop-filter:blur(4px)}
+  .camtools button.on{background:var(--warn);color:#141A21;border-color:var(--warn)}
+
+  /* ---------- verdict ---------- */
+  #verdict{position:absolute;inset:0;display:none;flex-direction:column;justify-content:center;
+    background:rgba(8,11,15,.975);padding:16px 16px 16px 22px;overflow-y:auto}
+  #verdict.show{display:flex;animation:rise .14s ease-out}
+  @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){#verdict.show{animation:none}}
+  .rail{position:absolute;left:0;top:0;bottom:0;width:8px;background:var(--muted)}
+  .headline{font-size:24px;font-weight:700;line-height:1.1;margin:0 0 12px}
+  .roll{font-family:'IBM Plex Mono',monospace;font-weight:600;
+    font-size:clamp(34px,12vw,58px);letter-spacing:.03em;line-height:1;margin:0 0 8px;word-break:break-all}
+  .name{font-size:20px;font-weight:500;line-height:1.25;margin:0 0 3px}
+  .programme{font-size:14px;color:var(--muted);margin:0}
+  .detail{font-size:14px;color:var(--muted);line-height:1.45;margin:14px 0 0}
+  .pend .rail{background:var(--pending)} .pend .headline{color:var(--pending)}
+  .ok .rail{background:var(--allow)}     .ok .headline{color:var(--allow)}
+  .warn .rail{background:var(--warn)}    .warn .headline{color:var(--warn)}
+  .bad .rail{background:var(--refuse)}   .bad .headline{color:var(--refuse)}
+
+  .vactions{display:flex;gap:8px;margin-top:18px;flex-wrap:wrap}
+  .vactions button{background:none;border:1px solid var(--line);color:var(--text);
+    font-size:14px;font-weight:500;padding:11px 18px;border-radius:8px}
+  .vactions button:disabled{color:var(--muted);border-style:dashed}
+  #photoWrap{margin-top:14px}
+  #photoWrap img{max-width:190px;max-height:230px;border-radius:8px;border:1px solid var(--line);display:block}
+  #photoNote{font-size:13px;color:var(--muted);margin:6px 0 0}
+
+  /* ---------- footer ---------- */
+  footer{flex:0 0 auto;background:var(--surface);border-top:1px solid var(--line);padding:8px 14px 12px}
+  .recent{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none;min-height:26px}
+  .recent::-webkit-scrollbar{display:none}
+  .chip{flex:0 0 auto;font-family:'IBM Plex Mono',monospace;font-size:11px;
+    border:1px solid var(--line);border-radius:5px;padding:5px 7px;color:var(--muted);background:none}
+  .chip.pend{border-color:rgba(91,147,207,.5);color:var(--pending)}
+  .chip.ok{border-color:rgba(31,181,116,.5);color:var(--allow)}
+  .chip.warn{border-color:rgba(224,160,42,.5);color:var(--warn)}
+  .chip.bad{border-color:rgba(224,69,59,.5);color:var(--refuse)}
+  .tools{display:flex;gap:8px;align-items:center;margin-top:8px}
+  .tools input{flex:1;min-width:0;background:var(--ink);border:1px solid var(--line);border-radius:7px;
+    color:var(--text);padding:9px 10px;font-family:'IBM Plex Mono',monospace;font-size:14px;text-transform:uppercase}
+  .tools button{background:var(--maroon);border:none;color:#fff;font-size:13px;font-weight:700;
+    padding:10px 14px;border-radius:7px}
+
+  /* ---------- re-auth ---------- */
+  #picker{position:absolute;inset:0;background:var(--ink);display:none;flex-direction:column;
+    justify-content:center;padding:26px;gap:10px;overflow-y:auto}
+  #picker.show{display:flex}
+  #picker h2{font-size:21px;margin:0}
+  #picker p{font-size:14px;color:var(--muted);line-height:1.5;margin:0 0 8px}
+  #pickerList{display:flex;flex-direction:column;gap:8px}
+  #pickerList button{background:var(--surface);border:1px solid var(--line);color:var(--text);
+    text-align:left;padding:14px 16px;border-radius:9px;line-height:1.35}
+  #pickerList button .code{font-weight:700;font-size:16px;display:block}
+  #pickerList button .meta{font-size:12px;color:var(--muted)}
+  #pickerList button.auto{border-style:dashed}
+
+  #reauth{position:absolute;inset:0;background:var(--ink);display:none;flex-direction:column;
+    justify-content:center;padding:28px;gap:14px}
+  #reauth.show{display:flex}
+  #reauth h2{font-size:21px;margin:0;color:var(--warn)}
+  #reauth p{font-size:14px;color:var(--muted);line-height:1.5;margin:0}
+</style>
+</head>
+<body>
+
+<section id="signin">
+  <div class="rule"></div>
+  <h1 id="signinTitle">Period Pass</h1>
+  <p>Sign in with the Google account on the volunteer list. Do this just before the sweep — sign-ins last one hour.</p>
+  <div id="gsiButton"></div>
+  <div id="signinError"></div>
+</section>
+
+<div id="banner"></div>
+
+<header id="hdr" class="hidden">
+  <div class="brand"></div>
+  <div class="hgroup">
+    <button class="period none" id="period" type="button">Loading…</button>
+    <div class="sub" id="who"></div>
+  </div>
+  <div class="tally">
+    <div class="count" id="count">0</div>
+    <div class="queued hidden" id="queued"></div>
+  </div>
+</header>
+
+<div id="stage" class="hidden">
+  <video id="video" playsinline muted></video>
+  <div id="frame"></div>
+  <div class="camtools">
+    <button id="torchBtn" class="hidden" type="button">Torch</button>
+    <button id="swapBtn" class="hidden" type="button">Camera</button>
+  </div>
+  <div class="hint" id="hint">Hold the pass 15–20 cm from the lens</div>
+
+  <div id="verdict">
+    <div class="rail"></div>
+    <h1 class="headline" id="vHead"></h1>
+    <p class="roll" id="vRoll"></p>
+    <p class="name" id="vName"></p>
+    <p class="programme" id="vProg"></p>
+    <p class="detail" id="vDetail"></p>
+    <div id="photoWrap" class="hidden">
+      <img id="vPhoto" alt="Photo on file for this roll number">
+      <p id="photoNote" class="hidden"></p>
+    </div>
+    <div class="vactions">
+      <button id="photoBtn" type="button">Show photo</button>
+      <button id="vNext" type="button">Next person</button>
+    </div>
+  </div>
+
+  <div id="picker">
+    <h2>Which class are you scanning?</h2>
+    <p id="pickerWhy"></p>
+    <div id="pickerList"></div>
+  </div>
+
+  <div id="reauth">
+    <h2>Sign-in expired</h2>
+    <p>Google sign-ins last one hour. Renew to keep scanning — anything already queued is kept and will be sent.</p>
+    <div id="gsiButton2"></div>
+  </div>
+</div>
+
+<footer id="ftr" class="hidden">
+  <div class="recent" id="recent"></div>
+  <div class="tools hidden" id="tools">
+    <input id="manualRoll" placeholder="Roll number" autocomplete="off" autocapitalize="characters">
+    <button id="manualGo" type="button">Record manually</button>
+  </div>
+</footer>
+
+<canvas id="work" class="hidden"></canvas>
+
+<script src="config.js"></script>
+<script src="vendor/jsQR.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="scanner.js"></script>
+</body>
+</html>

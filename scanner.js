@@ -1,0 +1,757 @@
+/**
+ * Period Pass — scanner client
+ *
+ * Offline-first. Every decode is written to a local queue and shown immediately using the
+ * roll number read out of the pass itself; the server verifies signature, roll and
+ * duplicates when the queue drains. A dead network delays verification, it does not lose
+ * the scan.
+ */
+(function () {
+  'use strict';
+
+  var CFG = window.PASS_CONFIG || {};
+  var $ = function (id) { return document.getElementById(id); };
+  var QUEUE_KEY = 'pp_queue_v1';
+  var OFFSET_KEY = 'pp_clock_offset_v1';
+
+  var state = {
+    idToken: null,
+    expiresAt: 0,
+    queue: [],
+    results: {},        // id -> verdict
+    chips: {},          // id -> element
+    chipOrder: [],      // ids in the order they were added, for trimming
+    showing: null,      // id of the verdict on screen
+    periodKey: '',      // chosen class when several share a slot
+    candidateSig: '',   // which classes were running when the choice was made
+    candidates: [],
+    bannerSticky: false,
+    clockOffset: 0,     // server clock minus this phone's clock, in ms
+    clockKnown: false,
+    sessionId: 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    recorded: 0,
+    draining: false,
+    scanning: false,
+    loop: 0,            // generation counter, so only one decode loop survives
+    seen: new Map(),    // decoded text -> timestamp
+    autoClear: null,
+    stream: null,
+    track: null,
+    devices: [],
+    deviceIndex: 0,
+    detector: null,
+    audio: null
+  };
+
+  // =========================================================================
+  // Local queue
+  // =========================================================================
+
+  var MAX_QUEUE_AGE_MS = 36 * 60 * 60 * 1000;   // matches the server's filing window
+
+  function loadQueue() {
+    try {
+      var raw = localStorage.getItem(QUEUE_KEY);
+      state.queue = raw ? JSON.parse(raw) : [];
+    } catch (e) { state.queue = []; }
+    purgeQueue();
+  }
+
+  /**
+   * Each queued item holds a student's signed pass. Once an item is too old for the server
+   * to file it is useless, so leaving it on the phone only keeps live student credentials
+   * sitting in browser storage. Dropped items are counted so the volunteer is told rather
+   * than the scans disappearing quietly.
+   */
+  function purgeQueue() {
+    var cutoff = Date.now() - MAX_QUEUE_AGE_MS;
+    var before = state.queue.length;
+    state.queue = state.queue.filter(function (i) {
+      var t = Date.parse(i.at);
+      return !isFinite(t) || t >= cutoff;
+    });
+    var dropped = before - state.queue.length;
+    if (dropped) {
+      saveQueue();
+      banner('alarm', dropped + ' scan(s) were held too long to be filed and have been ' +
+        'discarded. Enter those students by hand if it still matters.', true);
+    }
+    return dropped;
+  }
+
+  function saveQueue() {
+    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(state.queue)); } catch (e) {}
+  }
+
+  function enqueue(payload, manual) {
+    var item = {
+      id: 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      payload: payload,
+      manual: !!manual,
+      at: new Date().toISOString(),
+      // The clock error known at the moment of the scan, and the page session it belongs
+      // to. The server ignores the offset for items scanned in the session that is syncing
+      // — it can measure that itself — and uses it only across a reload or reboot, which is
+      // when the device clock may have changed underneath the queue.
+      offsetMs: state.clockOffset,
+      sess: state.sessionId
+    };
+    state.queue.push(item);
+    saveQueue();
+    updateQueueBadge();
+    return item;
+  }
+
+  function updateQueueBadge() {
+    var el = $('queued');
+    if (state.queue.length) {
+      el.textContent = state.queue.length + ' queued';
+      el.classList.remove('hidden');
+    } else {
+      el.classList.add('hidden');
+    }
+  }
+
+  // =========================================================================
+  // Google sign-in
+  // =========================================================================
+
+  waitFor(function () { return window.google && google.accounts && google.accounts.id; }, initGsi,
+    function () { signinError('Google sign-in did not load. Check the connection and reload.'); });
+
+  function initGsi() {
+    if (!/\.apps\.googleusercontent\.com$/.test(CFG.CLIENT_ID || '')) {
+      signinError('CLIENT_ID is not set in config.js.');
+      return;
+    }
+    $('signinTitle').textContent = CFG.EVENT_NAME || 'Period Pass';
+    google.accounts.id.initialize({
+      client_id: CFG.CLIENT_ID,
+      callback: onCredential,
+      auto_select: true,
+      cancel_on_tap_outside: false
+    });
+    ['gsiButton', 'gsiButton2'].forEach(function (id) {
+      google.accounts.id.renderButton($(id), {
+        theme: 'filled_black', size: 'large', shape: 'pill', text: 'signin_with', width: 260
+      });
+    });
+    google.accounts.id.prompt();
+  }
+
+  function onCredential(resp) {
+    var claims = decodeJwt(resp.credential);
+    if (!claims) { signinError('That sign-in could not be read. Try again.'); return; }
+    state.idToken = resp.credential;
+    state.expiresAt = (claims.exp || 0) * 1000;
+    $('reauth').classList.remove('show');
+    signinError('');
+    startSession();
+  }
+
+  function decodeJwt(jwt) {
+    try {
+      var b64 = jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4) b64 += '=';
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch (e) { return null; }
+  }
+
+  function tokenUsable() { return !!state.idToken && Date.now() < state.expiresAt - 60000; }
+
+  function requireReauth() {
+    $('reauth').classList.add('show');
+    if (window.google && google.accounts) google.accounts.id.prompt();
+  }
+
+  function signinError(msg) { $('signinError').textContent = msg || ''; }
+
+  // =========================================================================
+  // Server calls
+  // =========================================================================
+
+  function api(action, extra) {
+    if (!tokenUsable()) { requireReauth(); return Promise.reject(new Error('SIGNIN_EXPIRED')); }
+
+    var ctl = new AbortController();
+    var timer = setTimeout(function () { ctl.abort(); }, CFG.REQUEST_TIMEOUT_MS || 10000);
+    var sentAt = Date.now();
+
+    return fetch(CFG.EXEC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(Object.assign(
+        { action: action, idToken: state.idToken, clientNow: sentAt }, extra || {})),
+      redirect: 'follow',
+      signal: ctl.signal
+    }).then(function (r) {
+      if (!r.ok) throw new Error('Server returned ' + r.status);
+      return r.json();
+    }).then(function (data) {
+      noteClock(data, sentAt);
+      return data;
+    }).finally(function () { clearTimeout(timer); });
+  }
+
+  /**
+   * Every reply carries the server's clock. Comparing it with ours — allowing for half the
+   * round trip — gives the error on this phone's clock, which is then stamped onto each
+   * scan so the server can place it in the right class regardless of what the device
+   * thinks the time is.
+   */
+  function noteClock(data, sentAt) {
+    if (!data || typeof data.serverNow !== 'number') return;
+    var rtt = Date.now() - sentAt;
+    var offset = data.serverNow - (sentAt + rtt / 2);
+    state.clockOffset = Math.round(offset);
+    state.clockKnown = true;
+    try { localStorage.setItem(OFFSET_KEY, String(state.clockOffset)); } catch (e) {}
+
+    if (Math.abs(state.clockOffset) > 120000) {
+      banner('caution', 'This phone\u2019s clock is ' + Math.round(state.clockOffset / 60000) +
+        ' min out. Scans are being corrected, but turn on automatic date and time.');
+    }
+  }
+
+  function loadClockOffset() {
+    try {
+      var raw = localStorage.getItem(OFFSET_KEY);
+      if (raw !== null && isFinite(Number(raw))) state.clockOffset = Number(raw);
+    } catch (e) {}
+  }
+
+  function startSession() {
+    api('session').then(function (s) {
+      if (!s.ok) {
+        if (s.error === 'TOKEN_EXPIRED' || s.error === 'TOKEN_INVALID') { requireReauth(); return; }
+        signinError(s.message || 'Sign-in refused.');
+        return;
+      }
+      if (s.event && CFG.EVENT_CODE && s.event !== CFG.EVENT_CODE) {
+        signinError('This page is set to ' + CFG.EVENT_CODE + ' but the log expects ' + s.event +
+          '. Fix EVENT_CODE in config.js before scanning.');
+        return;
+      }
+      $('signin').classList.add('hidden');
+      ['hdr', 'stage', 'ftr'].forEach(function (id) { $(id).classList.remove('hidden'); });
+      $('who').textContent = s.volunteer + ' · ' + s.email;
+      setPeriod(s);
+      if (s.manualEntry) $('tools').classList.remove('hidden');
+
+      loadClockOffset();
+      loadQueue();
+      updateQueueBadge();
+      startCamera();
+      setInterval(function () { purgeQueue(); if (tokenUsable()) drain(); }, CFG.SYNC_INTERVAL_MS || 6000);
+      setInterval(pollPeriod, 45000);
+      setInterval(function () { if (!tokenUsable()) requireReauth(); }, 30000);
+    }).catch(function (err) {
+      if (err.message !== 'SIGNIN_EXPIRED') {
+        signinError('Could not reach the log (' + err.message + '). Check EXEC_URL in config.js.');
+      }
+    });
+  }
+
+  function pollPeriod() {
+    if (!tokenUsable() || state.draining) return;
+    api('period').then(function (p) { if (p.ok) setPeriod(p); }).catch(function () {});
+  }
+
+  function setPeriod(s) {
+    var el = $('period');
+    var cands = s.candidates || [];
+    var sig = cands.map(function (c) { return c.key; }).sort().join('|');
+
+    // The set of running classes changed, so any earlier choice is stale.
+    if (sig !== state.candidateSig) {
+      state.candidateSig = sig;
+      state.periodKey = '';
+      $('picker').classList.remove('show');
+    }
+
+    state.candidates = cands;
+
+    if (!cands.length) {
+      el.textContent = 'No class running';
+      el.className = 'period none';
+      $('hint').textContent = s.nextPeriod ? 'Next: ' + s.nextPeriod : 'Nothing else timetabled today';
+    } else if (cands.length === 1) {
+      el.textContent = cands[0].name + (cands[0].slot ? ' · ' + cands[0].slot : '');
+      el.className = 'period';
+      $('hint').textContent = 'Recording ' + cands[0].name +
+        (cands[0].room ? ' · ' + cands[0].room : '') + ' until ' + cands[0].ends;
+    } else {
+      var chosen = cands.filter(function (c) { return c.key === state.periodKey; })[0];
+      el.textContent = chosen ? chosen.name + ' · ' + chosen.slot
+                              : cands.length + ' classes in slot ' + (cands[0].slot || '?');
+      el.className = 'period pick';
+      $('hint').textContent = chosen
+        ? 'Recording ' + chosen.name + '. Tap the title to change.'
+        : 'Tap the title to pick a class, or scan and let the roll number decide.';
+    }
+
+    if (s.timetableWarning) {
+      banner('alarm', s.timetableWarning);
+    } else if (s.period && s.tabReady === false) {
+      banner('alarm', 'No log tab for “' + s.period + '”. Ask the desk to run Create all period tabs.');
+    } else if (s.endingSoon && s.period) {
+      banner('caution', s.minutesLeft + ' min left in ' + s.period +
+        '. Scans after that are recorded against the next class.');
+    } else if (!s.period) {
+      banner('caution', s.nextPeriod
+        ? 'No class running. Next: ' + s.nextPeriod
+        : 'No class running. Nothing will be recorded.');
+    } else {
+      banner('');
+    }
+  }
+
+  /**
+   * @param sticky  A notice that data was lost. It outranks status messages and stays until
+   *                the volunteer taps it. Ordering fixes alone are not enough here: any
+   *                later caller of banner('') would otherwise erase the only record that
+   *                scans were discarded, which is the one message that must not vanish.
+   */
+  function banner(tone, msg, sticky) {
+    var b = $('banner');
+    if (!msg && state.bannerSticky) return;          // routine updates cannot clear a loss notice
+    if (state.bannerSticky && !sticky) return;
+    state.bannerSticky = !!sticky && !!msg;
+    b.className = msg ? 'show ' + tone + (sticky ? ' sticky' : '') : '';
+    b.textContent = msg ? (sticky ? msg + '  (tap to dismiss)' : msg) : '';
+  }
+
+  $('banner').addEventListener('click', function () {
+    if (!state.bannerSticky) return;
+    state.bannerSticky = false;
+    banner('');
+  });
+
+  // =========================================================================
+  // Draining the queue
+  // =========================================================================
+
+  function drain() {
+    if (state.draining || !state.queue.length || !tokenUsable()) return;
+    state.draining = true;
+
+    var batch = state.queue.slice(0, 50);
+    var ids = batch.map(function (i) { return i.id; });
+
+    api('sync', { items: batch, periodKey: state.periodKey, sessionId: state.sessionId })
+      .then(function (resp) {
+        if (!resp.ok) {
+          if (resp.error === 'TOKEN_EXPIRED' || resp.error === 'TOKEN_INVALID') { requireReauth(); return; }
+          banner('caution', resp.message + ' Scans stay queued.');
+          return;
+        }
+        state.queue = state.queue.filter(function (i) { return ids.indexOf(i.id) === -1; });
+        saveQueue();
+        updateQueueBadge();
+        banner('');
+
+        // setPeriod is allowed to clear the banner, so the period is refreshed BEFORE the
+        // results are applied. Otherwise a notice about a queued scan that came back a
+        // problem is raised and wiped in the same tick, and the volunteer never sees it.
+        setPeriod(resp);
+        (resp.results || []).forEach(applyResult);
+      })
+      .catch(function (err) {
+        if (err.message === 'SIGNIN_EXPIRED') return;
+        banner('caution', 'Offline — ' + state.queue.length + ' scan(s) held on this phone.');
+      })
+      .finally(function () { state.draining = false; });
+  }
+
+  function applyResult(v) {
+    state.results[v.id] = v;
+    var tone = toneFor(v.status);
+    if (v.status === 'OK') { state.recorded++; $('count').textContent = state.recorded; }
+
+    var chip = state.chips[v.id];
+    if (chip) {
+      chip.className = 'chip ' + tone;
+      chip.textContent = v.roll || v.status;
+    }
+    if (state.showing === v.id) {
+      showVerdict(v);
+      signal(tone);
+    } else if (tone === 'bad' || tone === 'warn') {
+      // A queued scan came back a problem after the person has moved on.
+      banner('caution', (v.roll || 'A queued scan') + ': ' + v.headline + ' — tap the list below to review.');
+    }
+  }
+
+  function toneFor(status) {
+    if (status === 'OK') return 'ok';
+    if (status === 'DUPLICATE') return 'warn';
+    if (status === 'PENDING') return 'pend';
+    return 'bad';
+  }
+
+  // =========================================================================
+  // Choosing between classes that share a slot
+  // =========================================================================
+
+  function openPicker() {
+    var cands = state.candidates || [];
+    if (cands.length < 2) return;
+    $('pickerWhy').textContent = cands.length +
+      ' courses share slot ' + (cands[0].slot || '') +
+      '. Pick one, or leave it on automatic and each scan is filed by the student\u2019s enrolment.';
+
+    var list = $('pickerList');
+    list.innerHTML = '';
+
+    list.appendChild(pickerButton('Automatic', 'Decide by roll number', '', true));
+    cands.forEach(function (c) {
+      list.appendChild(pickerButton(c.name, (c.title || '') +
+        (c.room ? ' · ' + c.room : '') + ' · ends ' + c.ends, c.key, false));
+    });
+    $('picker').classList.add('show');
+  }
+
+  function pickerButton(code, meta, key, isAuto) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    if (isAuto) b.className = 'auto';
+    var c = document.createElement('span'); c.className = 'code'; c.textContent = code;
+    var m = document.createElement('span'); m.className = 'meta'; m.textContent = meta;
+    b.appendChild(c); b.appendChild(m);
+    b.addEventListener('click', function () {
+      state.periodKey = key;
+      $('picker').classList.remove('show');
+      pollPeriod();
+    });
+    return b;
+  }
+
+  $('period').addEventListener('click', openPicker);
+
+  // =========================================================================
+  // Camera
+  // =========================================================================
+
+  function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      banner('alarm', 'This browser cannot open the camera. Use Chrome on Android or Safari on iPhone.');
+      return;
+    }
+    openStream({ facingMode: { ideal: 'environment' } })
+      .then(listCameras)
+      .then(prepareDecoder)
+      .then(beginLoop)
+      .catch(function (err) {
+        banner('alarm', 'Camera blocked (' + err.name + '). Allow camera access for this site, then reload.');
+      });
+  }
+
+  function openStream(video) {
+    stopStream();
+    return navigator.mediaDevices.getUserMedia({ video: video, audio: false }).then(function (stream) {
+      state.stream = stream;
+      state.track = stream.getVideoTracks()[0];
+      var v = $('video');
+      v.srcObject = stream;
+      v.setAttribute('playsinline', '');
+      return v.play().then(function () { setTimeout(setupTorch, 400); });
+    });
+  }
+
+  function stopStream() {
+    if (state.stream) state.stream.getTracks().forEach(function (t) { t.stop(); });
+    state.stream = null; state.track = null;
+  }
+
+  function listCameras() {
+    if (!navigator.mediaDevices.enumerateDevices) return;
+    return navigator.mediaDevices.enumerateDevices().then(function (all) {
+      state.devices = all.filter(function (d) { return d.kind === 'videoinput'; });
+      if (state.devices.length > 1) $('swapBtn').classList.remove('hidden');
+    }).catch(function () {});
+  }
+
+  function setupTorch() {
+    var btn = $('torchBtn');
+    btn.classList.add('hidden');
+    btn.classList.remove('on');
+    if (!state.track || !state.track.getCapabilities) return;
+    try {
+      var caps = state.track.getCapabilities();
+      if (caps && caps.torch) btn.classList.remove('hidden');
+    } catch (e) {}
+  }
+
+  $('torchBtn').addEventListener('click', function () {
+    if (!state.track) return;
+    var on = !this.classList.contains('on');
+    state.track.applyConstraints({ advanced: [{ torch: on }] })
+      .then(function () { $('torchBtn').classList.toggle('on', on); })
+      .catch(function () { $('torchBtn').classList.add('hidden'); });
+  });
+
+  $('swapBtn').addEventListener('click', function () {
+    if (state.devices.length < 2) return;
+    state.scanning = false;
+    state.deviceIndex = (state.deviceIndex + 1) % state.devices.length;
+    openStream({ deviceId: { exact: state.devices[state.deviceIndex].deviceId } })
+      .then(beginLoop)
+      .catch(function () {
+        banner('caution', 'That camera would not open. Falling back to the main one.');
+        openStream({ facingMode: { ideal: 'environment' } }).then(beginLoop)
+          .catch(function () { banner('alarm', 'Camera lost. Reload the page.'); });
+      });
+  });
+
+  // =========================================================================
+  // Decode loop — native BarcodeDetector where available, jsQR everywhere else
+  // =========================================================================
+
+  function prepareDecoder() {
+    if (!('BarcodeDetector' in window)) return;
+    return BarcodeDetector.getSupportedFormats().then(function (formats) {
+      if (formats.indexOf('qr_code') !== -1) state.detector = new BarcodeDetector({ formats: ['qr_code'] });
+    }).catch(function () {});
+  }
+
+  /** Bumps the generation counter so any earlier loop exits on its next turn. */
+  function beginLoop() {
+    state.scanning = true;
+    state.loop++;
+    tick(state.loop);
+  }
+
+  function tick(generation) {
+    if (!state.scanning || generation !== state.loop) return;
+    decodeFrame().then(function (text) {
+      if (text) handleDecoded(text);
+    }).catch(function () {}).finally(function () {
+      pruneSeen();
+      setTimeout(function () { tick(generation); }, CFG.DECODE_INTERVAL_MS || 120);
+    });
+  }
+
+  function decodeFrame() {
+    var v = $('video');
+    if (!v.videoWidth) return Promise.resolve(null);
+
+    if (state.detector) {
+      return state.detector.detect(v).then(function (codes) {
+        return codes.length ? codes[0].rawValue : null;
+      }).catch(function () { state.detector = null; return null; });
+    }
+
+    var canvas = $('work');
+    var scale = Math.min(1, 640 / v.videoWidth);
+    var w = Math.round(v.videoWidth * scale);
+    var h = Math.round(v.videoHeight * scale);
+    canvas.width = w; canvas.height = h;
+    var ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(v, 0, 0, w, h);
+    var img = ctx.getImageData(0, 0, w, h);
+    var found = window.jsQR(img.data, w, h, { inversionAttempts: 'dontInvert' });
+    return Promise.resolve(found ? found.data : null);
+  }
+
+  /**
+   * Suppression is keyed on the decoded text and lives independently of the verdict card,
+   * so dismissing a verdict while the pass is still in frame does not re-submit it.
+   */
+  function handleDecoded(text) {
+    var now = Date.now();
+    var seenAt = state.seen.get(text);
+    if (seenAt && now - seenAt < 15000) return;
+    state.seen.set(text, now);
+    submit(text, false);
+  }
+
+  function pruneSeen() {
+    var cutoff = Date.now() - 60000;
+    state.seen.forEach(function (ts, key) { if (ts < cutoff) state.seen.delete(key); });
+  }
+
+  // =========================================================================
+  // Submitting
+  // =========================================================================
+
+  /** Reads the roll number straight off the pass so the card is instant, even offline. */
+  function localRoll(text) {
+    var parts = String(text).split('.');
+    if (parts.length !== 4 || parts[0] !== CFG.EVENT_CODE) return null;
+    return parts[1];
+  }
+
+  function submit(payload, manual) {
+    var item = enqueue(payload, manual);
+    var roll = manual ? String(payload).toUpperCase() : localRoll(payload);
+
+    addChip(item.id, roll || '?', 'pend');
+    state.showing = item.id;
+    cancelAutoClear();
+
+    if (!manual && !roll) {
+      showVerdict({ id: item.id, status: 'INVALID', headline: 'Not this event’s pass',
+        detail: 'The code does not carry an ' + CFG.EVENT_CODE + ' pass. Sending it to the log anyway.' });
+      signal('bad');
+    } else {
+      showVerdict({ id: item.id, status: 'PENDING', headline: 'Checking…', roll: roll || '',
+        detail: 'Verifying against today\u2019s log.' });
+    }
+    drain();
+  }
+
+  // =========================================================================
+  // Verdict card
+  // =========================================================================
+
+  function showVerdict(v) {
+    var tone = toneFor(v.status);
+    $('verdict').className = 'show ' + tone;
+    $('vHead').textContent = v.headline || '';
+    $('vRoll').textContent = v.roll || '';
+    $('vName').textContent = v.name || '';
+    $('vProg').textContent = v.programme || '';
+    $('vDetail').textContent = v.detail || '';
+
+    // Photo is loaded only when a volunteer asks for it — it never delays a scan.
+    $('photoWrap').classList.add('hidden');
+    $('photoNote').classList.add('hidden');
+    $('vPhoto').removeAttribute('src');
+
+    var btn = $('photoBtn');
+    if (v.status === 'PENDING') {
+      btn.disabled = true; btn.textContent = 'Photo';
+    } else if (v.photo) {
+      btn.disabled = false; btn.textContent = 'Show photo';
+    } else {
+      btn.disabled = true; btn.textContent = 'No photo on file';
+    }
+
+    cancelAutoClear();
+    if (v.status === 'OK') state.autoClear = setTimeout(clearVerdict, 2600);
+    if (v.status === 'AMBIGUOUS') setTimeout(openPicker, 400);
+  }
+
+  $('photoBtn').addEventListener('click', function () {
+    var v = state.results[state.showing];
+    if (!v || !v.photo) return;
+    cancelAutoClear();                       // the volunteer is inspecting; stop the timer
+    var wrap = $('photoWrap'), img = $('vPhoto'), note = $('photoNote');
+    wrap.classList.remove('hidden');
+    note.classList.remove('hidden');
+    note.textContent = 'Loading photo…';
+    img.onload = function () { note.classList.add('hidden'); };
+    img.onerror = function () {
+      note.textContent = 'Photo could not be loaded. The record is still valid.';
+      img.removeAttribute('src');
+    };
+    img.src = v.photo;
+    this.disabled = true;
+    this.textContent = 'Photo shown';
+  });
+
+  function cancelAutoClear() {
+    if (state.autoClear) { clearTimeout(state.autoClear); state.autoClear = null; }
+  }
+
+  function clearVerdict() {
+    cancelAutoClear();
+    $('verdict').className = '';
+    state.showing = null;
+  }
+  $('vNext').addEventListener('click', clearVerdict);
+
+  // =========================================================================
+  // Recent list
+  // =========================================================================
+
+  function addChip(id, label, tone) {
+    var c = document.createElement('button');
+    c.type = 'button';
+    c.className = 'chip ' + tone;
+    c.textContent = label;
+    c.addEventListener('click', function () {
+      var v = state.results[id];
+      if (!v) return;
+      state.showing = id;
+      showVerdict(v);
+    });
+    state.chips[id] = c;
+    state.chipOrder.push(id);
+    $('recent').prepend(c);
+
+    // The strip is trimmed to 30, and the lookup maps are trimmed with it. Leaving entries
+    // behind would grow both maps for the whole shift with no way to reach them.
+    var kids = $('recent').children;
+    while (kids.length > 30) $('recent').removeChild(kids[kids.length - 1]);
+    while (state.chipOrder.length > 30) {
+      var gone = state.chipOrder.shift();
+      delete state.chips[gone];
+      delete state.results[gone];
+    }
+  }
+
+  function signal(tone) {
+    if (navigator.vibrate) navigator.vibrate(tone === 'ok' ? 45 : [70, 60, 70]);
+    try {
+      state.audio = state.audio || new (window.AudioContext || window.webkitAudioContext)();
+      var osc = state.audio.createOscillator();
+      var gain = state.audio.createGain();
+      osc.connect(gain); gain.connect(state.audio.destination);
+      osc.frequency.value = tone === 'ok' ? 1080 : 340;
+      gain.gain.setValueAtTime(0.18, state.audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, state.audio.currentTime + 0.16);
+      osc.start(); osc.stop(state.audio.currentTime + 0.17);
+    } catch (e) {}
+  }
+
+  // =========================================================================
+  // Manual entry
+  // =========================================================================
+
+  $('manualGo').addEventListener('click', function () {
+    var v = $('manualRoll').value.trim();
+    if (!v) return;
+    $('manualRoll').value = '';
+    submit(v, true);
+  });
+  $('manualRoll').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') $('manualGo').click();
+  });
+
+  // =========================================================================
+  // Lifecycle
+  // =========================================================================
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      state.scanning = false;
+    } else if (state.stream && tokenUsable()) {
+      $('video').play().catch(function () {});
+      beginLoop();
+      drain();
+      pollPeriod();
+    }
+  });
+
+  window.addEventListener('online', function () { banner(''); drain(); });
+  window.addEventListener('offline', function () {
+    banner('caution', 'Offline — scans are held on this phone and sent when the signal returns.');
+  });
+
+  window.addEventListener('beforeunload', function (e) {
+    if (state.queue.length) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  function waitFor(test, ok, giveUp) {
+    var tries = 0;
+    (function loop() {
+      if (test()) return ok();
+      if (++tries > 100) return giveUp();
+      setTimeout(loop, 100);
+    })();
+  }
+})();
