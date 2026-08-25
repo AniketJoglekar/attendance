@@ -57,7 +57,9 @@
   .count{font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
     color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
   .queued{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--pending)}
-  .sub{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sub{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    background:none;border:none;padding:0;text-align:left;width:100%;font-family:inherit}
+  .sub::after{content:' ▾';opacity:.7}
 
   /* ---------- camera ---------- */
   #stage{position:relative;flex:1 1 auto;min-height:0;background:#000;overflow:hidden}
@@ -126,6 +128,18 @@
   #pickerList button .meta{font-size:12px;color:var(--muted)}
   #pickerList button.auto{border-style:dashed}
 
+  #signout{position:absolute;inset:0;background:var(--ink);display:none;flex-direction:column;
+    justify-content:center;padding:26px;gap:12px}
+  #signout.show{display:flex}
+  #signout h2{font-size:20px;margin:0}
+  #signout p{font-size:14px;color:var(--muted);line-height:1.5;margin:0;word-break:break-all}
+  #signout .warnline{color:var(--warn);font-weight:500}
+  #signoutActions{display:flex;flex-direction:column;gap:9px;margin-top:8px}
+  #signoutActions button{background:var(--maroon);border:none;color:#fff;font-family:inherit;
+    font-size:15px;font-weight:700;padding:14px;border-radius:9px}
+  #signoutActions button.ghost{background:none;border:1px solid var(--line);color:var(--text);
+    font-weight:500}
+
   #reauth{position:absolute;inset:0;background:var(--ink);display:none;flex-direction:column;
     justify-content:center;padding:28px;gap:14px}
   #reauth.show{display:flex}
@@ -149,7 +163,7 @@
   <div class="brand"></div>
   <div class="hgroup">
     <button class="period none" id="period" type="button">Loading…</button>
-    <div class="sub" id="who"></div>
+    <button class="sub" id="who" type="button"></button>
   </div>
   <div class="tally">
     <div class="count" id="count">0</div>
@@ -187,6 +201,16 @@
     <h2>Which class are you scanning?</h2>
     <p id="pickerWhy"></p>
     <div id="pickerList"></div>
+  </div>
+
+  <div id="signout">
+    <h2>Signed in as</h2>
+    <p id="signoutWho"></p>
+    <p id="signoutWarn" class="warnline hidden"></p>
+    <div id="signoutActions">
+      <button id="signoutGo" type="button">Sign out</button>
+      <button id="signoutCancel" type="button" class="ghost">Keep scanning</button>
+    </div>
   </div>
 
   <div id="reauth">

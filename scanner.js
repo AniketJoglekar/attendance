@@ -44,6 +44,8 @@
     candidateSig: '',   // which classes were running when the choice was made
     candidates: [],
     bannerSticky: false,
+    email: '',
+    timers: [],         // every interval this session owns, so sign-out can cancel them
     clockOffset: 0,     // server clock minus this phone's clock, in ms
     clockKnown: false,
     sessionId: 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
@@ -86,7 +88,11 @@
     var before = state.queue.length;
     state.queue = state.queue.filter(function (i) {
       var t = Date.parse(i.at);
-      return !isFinite(t) || t >= cutoff;
+      // An unreadable timestamp is DROPPED, not kept. Keeping it meant a live pass token sat
+      // in localStorage for the rest of the semester and was re-sent on every drain, and the
+      // server refused it every time.
+      if (!isFinite(t)) return false;
+      return t >= cutoff;
     });
     var dropped = before - state.queue.length;
     if (dropped) {
@@ -112,7 +118,13 @@
       // — it can measure that itself — and uses it only across a reload or reboot, which is
       // when the device clock may have changed underneath the queue.
       offsetMs: state.clockOffset,
-      sess: state.sessionId
+      sess: state.sessionId,
+      // The class chosen AT SCAN TIME, not at sync time. The server already reads
+      // item.periodKey and falls back to the batch's key; the client simply never set it,
+      // so a batch taken in one shared slot and synced during another was attributed to
+      // whatever was selected when the queue happened to drain. Silent, and only when two
+      // courses share a slot — which is exactly when attribution matters.
+      periodKey: state.periodKey || ''
     };
     state.queue.push(item);
     saveQueue();
@@ -188,6 +200,82 @@
   function signinError(msg) { $('signinError').textContent = msg || ''; }
 
   // =========================================================================
+  // Signing out
+  // =========================================================================
+
+  /**
+   * Needed for two reasons that are easy to miss until they bite.
+   *
+   * A phone handed to a second TA would otherwise keep recording under the first one's name,
+   * because auto_select silently reuses the last account. And anyone who signs in with the
+   * wrong account — a personal address rather than the institute one — is otherwise stuck
+   * with "not on the volunteer list" and no way back.
+   */
+  $('who').addEventListener('click', function () {
+    if (!state.idToken) return;
+    $('signoutWho').textContent = state.email || '(unknown account)';
+
+    var warn = $('signoutWarn');
+    if (state.queue.length) {
+      // Queued scans carry no identity of their own; whoever is signed in when they sync is
+      // the name recorded against them. Sending them first keeps the log honest.
+      warn.textContent = state.queue.length + ' scan(s) have not been sent yet. Sign out now ' +
+        'and they will be recorded under whoever signs in next. Stay online for a moment first.';
+      warn.classList.remove('hidden');
+      drain();
+    } else {
+      warn.classList.add('hidden');
+    }
+    $('signout').classList.add('show');
+  });
+
+  $('signoutCancel').addEventListener('click', function () {
+    $('signout').classList.remove('show');
+  });
+
+  $('signoutGo').addEventListener('click', function () {
+    state.scanning = false;
+    stopSessionTimers();
+    stopStream();
+    cancelAutoClear();
+
+    state.idToken = null;
+    state.expiresAt = 0;
+    state.email = '';
+    state.periodKey = '';
+    state.candidateSig = '';
+    state.candidates = [];
+    state.seen.clear();
+    state.draining = false;
+    state.showing = null;
+    state.bannerSticky = false;
+
+    // The outgoing volunteer's scans must not be readable by whoever picks up the phone.
+    // Every chip is tappable and shows a student's name and roll number, so clearing the
+    // strip is not cosmetic. The queue itself is kept: those scans still have to be sent.
+    state.recorded = 0;
+    state.chips = {};
+    state.chipOrder = [];
+    state.results = {};
+    $('recent').innerHTML = '';
+    $('count').textContent = '0';
+    banner('');
+
+    // Without this the next sign-in silently reuses the same account, which is exactly the
+    // problem someone is trying to solve by signing out.
+    try { google.accounts.id.disableAutoSelect(); } catch (e) {}
+
+    $('signout').classList.remove('show');
+    $('verdict').className = '';
+    ['hdr', 'stage', 'ftr'].forEach(function (id) { $(id).classList.add('hidden'); });
+    $('signin').classList.remove('hidden');
+    signinError(state.queue.length
+      ? state.queue.length + ' scan(s) are still held on this phone. Whoever signs in next ' +
+        'will have them recorded in their name.'
+      : '');
+  });
+
+  // =========================================================================
   // Server calls
   // =========================================================================
 
@@ -245,7 +333,10 @@
     api('session').then(function (s) {
       if (!s.ok) {
         if (s.error === 'TOKEN_EXPIRED' || s.error === 'TOKEN_INVALID') { requireReauth(); return; }
-        signinError(s.message || 'Sign-in refused.');
+        // NOT_CONFIGURED is the backend saying setup is unfinished. Showing it verbatim
+        // saves the volunteer reporting "it does not work" and the office guessing.
+        signinError((s.error === 'NOT_CONFIGURED' ? 'Setup incomplete. ' : '') +
+                    (s.message || 'Sign-in refused.'));
         return;
       }
       if (s.event && CFG.EVENT_CODE && s.event !== CFG.EVENT_CODE) {
@@ -256,6 +347,7 @@
       $('signin').classList.add('hidden');
       ['hdr', 'stage', 'ftr'].forEach(function (id) { $(id).classList.remove('hidden'); });
       $('who').textContent = s.volunteer + ' · ' + s.email;
+      state.email = s.email;
       setPeriod(s);
       if (s.manualEntry) $('tools').classList.remove('hidden');
 
@@ -263,14 +355,29 @@
       loadQueue();
       updateQueueBadge();
       startCamera();
-      setInterval(function () { purgeQueue(); if (tokenUsable()) drain(); }, CFG.SYNC_INTERVAL_MS || 6000);
-      setInterval(pollPeriod, 45000);
-      setInterval(function () { if (!tokenUsable()) requireReauth(); }, 30000);
+      // Tracked, because signing out and back in would otherwise leave the previous
+      // session's timers running: three sign-ins meant three drain loops racing one queue.
+      startSessionTimers();
     }).catch(function (err) {
       if (err.message !== 'SIGNIN_EXPIRED') {
         signinError('Could not reach the log (' + err.message + '). Check EXEC_URL in config.js.');
       }
     });
+  }
+
+  function startSessionTimers() {
+    stopSessionTimers();
+    state.timers.push(setInterval(function () {
+      purgeQueue();
+      if (tokenUsable()) drain();
+    }, CFG.SYNC_INTERVAL_MS || 6000));
+    state.timers.push(setInterval(pollPeriod, 45000));
+    state.timers.push(setInterval(function () { if (!tokenUsable()) requireReauth(); }, 30000));
+  }
+
+  function stopSessionTimers() {
+    state.timers.forEach(clearInterval);
+    state.timers = [];
   }
 
   function pollPeriod() {
