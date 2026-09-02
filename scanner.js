@@ -32,7 +32,22 @@
   var QUEUE_KEY = 'pp_queue_v1';
   var OFFSET_KEY = 'pp_clock_offset_v1';
 
+  /**
+   * Photographs arrive as bytes over the authenticated channel, never from a URL.
+   *
+   * There is no address here to leak, share, or leave in a browser history — the verdict
+   * carries a short-lived ticket, and the photo button exchanges it for the image itself.
+   * Held in a plain variable so it never reaches the HTTP cache or disk, and dropped on
+   * sign-out with the rest of the verdict state. A pass that is scanned but never inspected
+   * is never transmitted at all.
+   */
+  var photoCache = {};                       // roll -> data URI, this session only
+
+  // The outstanding forced check, or null. While set, scanning is suspended.
+  // {roll, course, ticket, id, timer, deadline}
+
   var state = {
+    check: null,                           // outstanding forced photo check; blocks scanning
     idToken: null,
     expiresAt: 0,
     queue: [],
@@ -107,11 +122,14 @@
     try { localStorage.setItem(QUEUE_KEY, JSON.stringify(state.queue)); } catch (e) {}
   }
 
-  function enqueue(payload, manual) {
+  function enqueue(payload, manual, noDevice) {
     var item = {
       id: 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
       payload: payload,
       manual: !!manual,
+      // Vouching for a student with no working phone on a dynamic day. Capped server-side
+      // and named in the log — see NO_DEVICE_CAP_PER_DAY.
+      noDevice: !!noDevice,
       at: new Date().toISOString(),
       // The clock error known at the moment of the scan, and the page session it belongs
       // to. The server ignores the offset for items scanned in the session that is syncing
@@ -257,6 +275,9 @@
     state.chips = {};
     state.chipOrder = [];
     state.results = {};
+    photoCache = {};                       // faces must not survive the volunteer who saw them
+    if (state.check && state.check.timer) clearTimeout(state.check.timer);
+    state.check = null;                    // an outstanding check must not block the next session
     $('recent').innerHTML = '';
     $('count').textContent = '0';
     banner('');
@@ -386,6 +407,8 @@
   }
 
   function setPeriod(s) {
+    // Authoritative value from the server; config.js is only a fallback.
+    if (s && s.photoCheckWindowMs) state.photoCheckWindowMs = s.photoCheckWindowMs;
     var el = $('period');
     var cands = s.candidates || [];
     var sig = cands.map(function (c) { return c.key; }).sort().join('|');
@@ -491,6 +514,99 @@
       .finally(function () { state.draining = false; });
   }
 
+  /**
+   * Forced photo check.
+   *
+   * The photo is fetched automatically rather than waiting for a tap: the point is that the
+   * volunteer looks, and a button they must press first is a button they can learn to press
+   * without looking. Fetching also records the view in the audit trail, so an answer given
+   * with no corresponding fetch is visible afterwards.
+   *
+   * The countdown is not decoration. An answer given two minutes later is a guess, and a
+   * guess recorded as a pass would quietly destroy the meaning of every honest answer beside
+   * it — so an unanswered prompt records as TIMEOUT, which is a different fact from "matches".
+   */
+  function startCheck(v) {
+    cancelAutoClear();
+    state.check = {
+      roll: v.roll, ticket: v.photoTicket, id: v.id, timer: null,
+      // Set when the photograph is actually DISPLAYED, not now. api() can take its full
+      // timeout on a weak signal, and a window that short exists because a late answer is a
+      // guess — spending it on network latency produces exactly the rushed answers the timer
+      // is meant to prevent. The course is not carried at all: the server wrote it on the
+      // ASKED row and joins the two by scan id.
+      deadline: null
+    };
+    state.scanning = false;
+
+    $('photoBtn').classList.add('hidden');
+    $('vNext').classList.add('hidden');
+    $('checkBox').classList.remove('hidden');
+    $('checkYes').disabled = true;
+    $('checkNo').disabled = true;
+    $('checkAsk').textContent = 'Fetching photo…';
+
+    fetchPhoto(v).then(function () {
+      if (!state.check) return;
+      $('checkAsk').textContent = 'Check this face against the person in front of you.';
+      $('checkYes').disabled = false;
+      $('checkNo').disabled = false;
+      state.check.deadline = Date.now() + (state.photoCheckWindowMs || CFG.PHOTO_CHECK_WINDOW_MS || 30000);
+      tick();
+    }).catch(function () {
+      if (!state.check) return;
+      // No photo means no check is possible. Recording MATCH here would be a lie, so it
+      // closes as TIMEOUT — an unanswerable prompt and an ignored one are both "not checked",
+      // which is the honest category.
+      state.check.unanswerable = true;
+      $('checkAsk').textContent = 'Photo unavailable — cannot check. Carry on.';
+      $('checkYes').disabled = true;
+      $('checkNo').disabled = false;
+      $('checkNo').textContent = 'Continue';
+    });
+
+    function tick() {
+      if (!state.check || !state.check.deadline) return;
+      var left = Math.max(0, Math.ceil((state.check.deadline - Date.now()) / 1000));
+      $('checkTimer').textContent = left + 's — after this it records as not checked';
+      if (left <= 0) { answerCheck('TIMEOUT'); return; }
+      state.check.timer = setTimeout(tick, 500);
+    }
+    $('checkTimer').textContent = '';
+  }
+
+  function answerCheck(answer) {
+    var c = state.check;
+    if (!c) return;
+    if (c.timer) clearTimeout(c.timer);
+    state.check = null;
+
+    $('checkBox').classList.add('hidden');
+    $('checkNo').textContent = "Doesn't match";
+    $('photoBtn').classList.remove('hidden');
+    $('vNext').classList.remove('hidden');
+
+    if (answer === 'MISMATCH') {
+      banner('alarm', 'Recorded as not matching. The scan still counts; the office is told ' +
+        'tonight. Do not confront anyone.', true);
+    }
+
+    // Fire and forget: the answer must not hold up scanning, and a failed send is visible
+    // afterwards as an ASKED row with no outcome.
+    api('verify', { roll: c.roll, answer: answer, id: c.id, ticket: c.ticket })
+      .catch(function () { /* the gap in the trail is the record */ });
+
+    clearVerdict();
+    if (tokenUsable()) beginLoop();
+  }
+
+  $('checkYes').addEventListener('click', function () { answerCheck('MATCH'); });
+  $('checkNo').addEventListener('click', function () {
+    // Doubles as "Continue" when no photo could be fetched. That case is not a mismatch —
+    // nothing was compared — so it records as TIMEOUT, the honest "not checked".
+    answerCheck(state.check && state.check.unanswerable ? 'TIMEOUT' : 'MISMATCH');
+  });
+
   function applyResult(v) {
     state.results[v.id] = v;
     var tone = toneFor(v.status);
@@ -504,6 +620,15 @@
     if (state.showing === v.id) {
       showVerdict(v);
       signal(tone);
+      // The server chose this scan for a forced check. Only ever set on a fresh, online
+      // verdict, so this cannot fire for a scan the queue held while the student walked off.
+      if (v.verifyPhoto && !state.check) startCheck(v);
+    } else if (v.verifyPhoto) {
+      // Chosen, but the volunteer has already moved to another verdict. Checking a face that
+      // is no longer on screen proves nothing, so it closes honestly as not checked rather
+      // than dragging them back to a stale card.
+      api('verify', { roll: v.roll, answer: 'TIMEOUT', id: v.id, ticket: v.photoTicket })
+        .catch(function () {});
     } else if (tone === 'bad' || tone === 'warn') {
       // A queued scan came back a problem after the person has moved on.
       banner('caution', (v.roll || 'A queued scan') + ': ' + v.headline + ' — tap the list below to review.');
@@ -644,6 +769,9 @@
 
   /** Bumps the generation counter so any earlier loop exits on its next turn. */
   function beginLoop() {
+    // A forced check blocks NEW scans only. The queue keeps draining in the background, so a
+    // volunteer is never waiting on the network to get past a prompt.
+    if (state.check) return;
     state.scanning = true;
     state.loop++;
     tick(state.loop);
@@ -709,8 +837,8 @@
     return parts[1];
   }
 
-  function submit(payload, manual) {
-    var item = enqueue(payload, manual);
+  function submit(payload, manual, noDevice) {
+    var item = enqueue(payload, manual, noDevice);
     var roll = manual ? String(payload).toUpperCase() : localRoll(payload);
 
     addChip(item.id, roll || '?', 'pend');
@@ -746,13 +874,24 @@
     $('photoNote').classList.add('hidden');
     $('vPhoto').removeAttribute('src');
 
+    // The photo is available on EVERY resolved scan, not only sampled ones — sampling decides
+    // what is compulsory, never what is possible. It matters most on REVOKED and NOT_ENROLLED,
+    // where a volunteer is about to refuse someone.
+    //
+    // The three unavailable cases say WHY, because they are different facts and a volunteer
+    // acts differently on each. Labelling them all "No photo on file" told them nothing to
+    // check when the truth was that no photo could be requested here.
     var btn = $('photoBtn');
     if (v.status === 'PENDING') {
       btn.disabled = true; btn.textContent = 'Photo';
-    } else if (v.photo) {
+    } else if (v.hasPhoto && v.photoTicket) {
       btn.disabled = false; btn.textContent = 'Show photo';
-    } else {
+    } else if (v.hasPhoto && !v.photoTicket) {
+      btn.disabled = true; btn.textContent = 'Photo n/a (typed entry)';
+    } else if (v.roll) {
       btn.disabled = true; btn.textContent = 'No photo on file';
+    } else {
+      btn.disabled = true; btn.textContent = 'No photo';
     }
 
     cancelAutoClear();
@@ -760,23 +899,78 @@
     if (v.status === 'AMBIGUOUS') setTimeout(openPicker, 400);
   }
 
+  /**
+   * Photographs arrive as bytes over the authenticated channel, never from a URL.
+   *
+   * There is no address here to leak, share or put in a browser history — the verdict carries
+   * a short-lived ticket, and this exchanges it for the image itself. Held in a plain variable
+   * so it never reaches the HTTP cache or disk, and dropped on sign-out with the rest of the
+   * verdict state. A pass that is scanned but never inspected is never transmitted at all.
+   */
   $('photoBtn').addEventListener('click', function () {
     var v = state.results[state.showing];
-    if (!v || !v.photo) return;
+    if (!v || !v.hasPhoto || !v.photoTicket) return;
     cancelAutoClear();                       // the volunteer is inspecting; stop the timer
+
+    var btn = this;
     var wrap = $('photoWrap'), img = $('vPhoto'), note = $('photoNote');
     wrap.classList.remove('hidden');
     note.classList.remove('hidden');
-    note.textContent = 'Loading photo…';
+    img.removeAttribute('src');
+    btn.disabled = true;
+
     img.onload = function () { note.classList.add('hidden'); };
     img.onerror = function () {
-      note.textContent = 'Photo could not be loaded. The record is still valid.';
+      note.textContent = 'Photo could not be displayed. The record is still valid.';
       img.removeAttribute('src');
     };
-    img.src = v.photo;
-    this.disabled = true;
-    this.textContent = 'Photo shown';
+
+    note.textContent = photoCache[v.roll] ? 'Loading photo…' : 'Fetching photo…';
+    btn.textContent = 'Fetching…';
+
+    fetchPhoto(v).then(function () {
+      btn.textContent = 'Photo shown';
+    }).catch(function (err) {
+      note.textContent = err.message || 'Photo unavailable.';
+      // Re-enable: a ticket can expire while the verdict is still on screen, and the
+      // volunteer should be able to try again after rescanning rather than be stuck.
+      btn.disabled = false;
+      btn.textContent = 'Show photo';
+    });
   });
+
+  /**
+   * Fetches a photograph and puts it on screen. One path for both the manual button and the
+   * forced check, so the caching, the error shape and the audit trail cannot drift apart.
+   * Resolves once the image is displayed; rejects with a message worth showing.
+   */
+  function fetchPhoto(v) {
+    var wrap = $('photoWrap'), img = $('vPhoto'), note = $('photoNote');
+    wrap.classList.remove('hidden');
+    note.classList.remove('hidden');
+
+    var show = function (uri) {
+      return new Promise(function (resolve, reject) {
+        img.onload = function () { note.classList.add('hidden'); resolve(); };
+        img.onerror = function () { img.removeAttribute('src'); reject(new Error('Photo could not be displayed.')); };
+        img.src = uri;
+      });
+    };
+
+    if (photoCache[v.roll]) return show(photoCache[v.roll]);
+    if (!v.photoTicket) return Promise.reject(new Error('No photo available for this scan.'));
+
+    // api() resolves to the PARSED body, not a Response — resp.ok is the server's own flag.
+    return api('photo', { roll: v.roll, ticket: v.photoTicket }).then(function (resp) {
+      if (!resp.ok) {
+        if (resp.error === 'TOKEN_EXPIRED' || resp.error === 'TOKEN_INVALID') requireReauth();
+        throw new Error(resp.message || 'Photo unavailable.');
+      }
+      var uri = 'data:' + resp.mime + ';base64,' + resp.data;
+      photoCache[v.roll] = uri;
+      return show(uri);
+    });
+  }
 
   function cancelAutoClear() {
     if (state.autoClear) { clearTimeout(state.autoClear); state.autoClear = null; }
@@ -841,7 +1035,18 @@
     var v = $('manualRoll').value.trim();
     if (!v) return;
     $('manualRoll').value = '';
-    submit(v, true);
+    submit(v, true, false);
+  });
+
+  // Separate button, not a checkbox on the one above. Vouching is a different act from an
+  // ordinary typed entry — it is capped, it names you in the log, and on a dynamic day it is
+  // the only typed entry accepted at all. A tick box beside "Record manually" would get
+  // clicked by habit; a button you have to reach for does not.
+  $('noDeviceGo').addEventListener('click', function () {
+    var v = $('manualRoll').value.trim();
+    if (!v) return;
+    $('manualRoll').value = '';
+    submit(v, true, true);
   });
   $('manualRoll').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') $('manualGo').click();

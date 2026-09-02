@@ -98,6 +98,13 @@
   #photoWrap{margin-top:14px}
   #photoWrap img{max-width:190px;max-height:230px;border-radius:8px;border:1px solid var(--line);display:block}
   #photoNote{font-size:13px;color:var(--muted);margin:6px 0 0}
+  #noDeviceGo{background:var(--warn);color:#08101a}
+  #checkBox{margin-top:14px;padding:12px;border:2px solid var(--warn);border-radius:10px;
+    background:rgba(224,160,42,0.08)}
+  #checkAsk{margin:0 0 10px;font-weight:700;color:var(--warn)}
+  #checkNo{background:var(--refuse);color:#fff}
+  #checkTimer{margin:8px 0 0;font-size:13px;color:var(--muted);
+    font-family:'IBM Plex Mono',monospace}
 
   /* ---------- footer ---------- */
   footer{flex:0 0 auto;background:var(--surface);border-top:1px solid var(--line);padding:8px 14px 12px}
@@ -195,6 +202,16 @@
       <button id="photoBtn" type="button">Show photo</button>
       <button id="vNext" type="button">Next person</button>
     </div>
+    <!-- Forced photo check. Replaces the buttons above so there is no way past it except
+         answering; the countdown is visible so the volunteer knows it will not wait. -->
+    <div id="checkBox" class="hidden">
+      <p id="checkAsk">Check this face against the person in front of you.</p>
+      <div class="vactions">
+        <button id="checkYes" type="button">Matches</button>
+        <button id="checkNo" type="button">Doesn't match</button>
+      </div>
+      <p id="checkTimer"></p>
+    </div>
   </div>
 
   <div id="picker">
@@ -225,6 +242,7 @@
   <div class="tools hidden" id="tools">
     <input id="manualRoll" placeholder="Roll number" autocomplete="off" autocapitalize="characters">
     <button id="manualGo" type="button">Record manually</button>
+    <button id="noDeviceGo" type="button">No device</button>
   </div>
 </footer>
 

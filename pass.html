@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="strict-origin">
+<title>Your pass — Period Pass</title>
+<style>
+  :root{
+    --bg:#0B0F14; --card:#131A22; --ink:#E8EEF4; --muted:#8FA3B6;
+    --ok:#2E9E5B; --warn:#E0A02A; --line:#22303D;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+    min-height:100vh;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;padding:20px;text-align:center}
+  h1{font-size:19px;margin:0 0 4px}
+  p{margin:6px 0;color:var(--muted);font-size:14px;line-height:1.5;max-width:340px}
+  .hidden{display:none!important}
+  #card{background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:22px;width:100%;max-width:340px}
+  /* White quiet zone: a scanner needs contrast, and a dark card behind a dark QR
+     is the commonest reason a code will not read off a screen. */
+  #qrbox{background:#fff;border-radius:12px;padding:14px;margin:14px 0;
+    display:flex;align-items:center;justify-content:center;min-height:240px}
+  #roll{font-family:'IBM Plex Mono',monospace;font-size:24px;font-weight:700;letter-spacing:1px}
+  #name{font-size:15px;color:var(--muted);margin-top:2px}
+  #ttl{font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--warn)}
+  #msg{font-size:15px}
+  button{font:inherit;font-weight:600;padding:12px 18px;border:0;border-radius:10px;
+    background:var(--ok);color:#fff;cursor:pointer;margin-top:10px}
+  .bright{background:#fff;color:#000;border-radius:12px}
+</style>
+</head>
+<body>
+
+<div id="signin">
+  <h1>Your pass</h1>
+  <p>Sign in with your college account to show today's code.</p>
+  <div id="gsiBtn"></div>
+  <p id="signinError" class="hidden" style="color:var(--warn)"></p>
+</div>
+
+<div id="card" class="hidden">
+  <div id="roll"></div>
+  <div id="name"></div>
+  <div id="qrbox"><span style="color:#666;font-size:13px">Loading…</span></div>
+  <div id="ttl"></div>
+  <p id="hint">Hold this up for the volunteer. It changes every minute on its own.</p>
+</div>
+
+<div id="notice" class="hidden">
+  <h1>Nothing to show</h1>
+  <p id="msg"></p>
+</div>
+
+<script src="config.js"></script>
+<!-- QR *generator*. The scanner vendors jsQR, which only decodes — this page needs the
+     opposite direction, so it is a second, separate library. -->
+<script src="vendor/qrcode.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="pass.js"></script>
+
+</body>
+</html>
