@@ -13,12 +13,12 @@ window.PASS_CONFIG = {
   // OAuth 2.0 Web application client ID from Google Cloud Console.
   // Authorised JavaScript origin must be exactly your Pages origin,
   // e.g. https://iitt-gac.github.io  (no path, no trailing slash).
-  CLIENT_ID: 'PASTE_YOUR_CLIENT_ID.apps.googleusercontent.com',
+  CLIENT_ID: '813055517806-0emc4nog3fv9jjc0u8sp8tboj66vlo82.apps.googleusercontent.com',
 
   // Must match EVENT_CODE at the top of 00_Config.gs. Lets the scanner read a roll number
   // off a pass with no network, so the volunteer sees it instantly, and makes the scanner
   // refuse to start if the site and the backend are set to different semesters.
-  EVENT_CODE: 'IITT-2026ODD',
+  EVENT_CODE: 'IITT-2026-JulDec',
 
   // Shown on the sign-in screen only.
   EVENT_NAME: 'IIT Tirupati — Class Attendance',
