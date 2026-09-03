@@ -8,7 +8,7 @@ window.PASS_CONFIG = {
 
   // Apps Script web app URL, ending in /exec.
   // Deploy > New deployment > Web app, Execute as: Me, Who has access: Anyone.
-  EXEC_URL: 'https://script.google.com/macros/s/PASTE_YOUR_DEPLOYMENT_ID/exec',
+  EXEC_URL: 'https://script.google.com/macros/s/AKfycbw01DXPzU0ouw5L6nvs2EVwzz8vOHt1d8X7A6-t-cdclGfNlmPXbrKdrYCc0X8f-gmt/exec',
 
   // OAuth 2.0 Web application client ID from Google Cloud Console.
   // Authorised JavaScript origin must be exactly your Pages origin,
