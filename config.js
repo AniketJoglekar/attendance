@@ -6,11 +6,15 @@
  */
 window.PASS_CONFIG = {
 
-  // Apps Script web app URL, ending in /exec.
-  // Deploy > New deployment > Web app, Execute as: Me, Who has access: Anyone.
+  // Apps Script web app URL, ending in /exec. Filled in.
+  //
+  // This must stay in step with the deployment: editing the Apps Script code changes nothing
+  // for volunteers until you redeploy, and redeploying as a NEW DEPLOYMENT (rather than a new
+  // version of the existing one) issues a different URL that must be pasted back here.
+  // Deploy > Manage deployments > pencil > Version: New version keeps this URL valid.
   EXEC_URL: 'https://script.google.com/macros/s/AKfycbw01DXPzU0ouw5L6nvs2EVwzz8vOHt1d8X7A6-t-cdclGfNlmPXbrKdrYCc0X8f-gmt/exec',
 
-  // OAuth 2.0 Web application client ID from Google Cloud Console.
+  // OAuth 2.0 Web application client ID from Google Cloud Console. Filled in.
   // Authorised JavaScript origin must be exactly your Pages origin,
   // e.g. https://iitt-gac.github.io  (no path, no trailing slash).
   CLIENT_ID: '813055517806-0emc4nog3fv9jjc0u8sp8tboj66vlo82.apps.googleusercontent.com',
