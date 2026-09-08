@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Period Pass</title>
+
+<!--
+  A LANDING PAGE, and deliberately nothing else.
+
+  It signs nobody in and asks nobody who they are. Four links; each destination already
+  authenticates and already refuses correctly on its own — the scanner against the Volunteers
+  sheet, the pass page against Students, the faculty pages against Courses column H. Signing in
+  here to decide which buttons to show would add a SECOND authorisation surface that has to
+  agree with four existing ones, and the failure mode of a disagreement is somebody being told
+  they are not a volunteer on a page that would have let them scan.
+
+  It is also NOT part of the scanner. index.html is a working tool with a camera running in a
+  lecture hall; putting a role chooser in front of it costs a TA a click before every session
+  and mixes an operational surface with a navigational one. A TA who has bookmarked the scanner
+  keeps working exactly as before, which matters mid-semester.
+-->
+
+<style>
+  :root { --ink:#1a1a1a; --muted:#5b5b5b; --line:#dcdcdc; --bg:#fbfbfa; --accent:#0b5fff; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin:0; min-height:100dvh; background:var(--bg); color:var(--ink);
+    font:16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:24px calc(24px + env(safe-area-inset-left)) calc(24px + env(safe-area-inset-bottom));
+  }
+  h1 { font-size:22px; font-weight:650; margin:0 0 4px; letter-spacing:-0.01em; }
+  .sub { color:var(--muted); font-size:14px; margin:0 0 28px; }
+  nav { display:grid; gap:12px; width:100%; max-width:380px; }
+  a.role {
+    display:flex; align-items:center; gap:14px; text-decoration:none; color:inherit;
+    background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px 18px;
+    /* 56px+ so it is comfortably tappable on a phone held one-handed in a corridor. */
+    min-height:64px;
+  }
+  a.role:active { background:#f2f4f8; }
+  a.role:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .label { font-weight:600; }
+  .hint { color:var(--muted); font-size:13px; }
+  .icon { font-size:22px; width:28px; text-align:center; flex:none; }
+  .role.disabled { opacity:.45; cursor:default; }
+  .role.disabled:active { background:#fff; }
+  footer { margin-top:26px; color:var(--muted); font-size:12px; text-align:center; max-width:380px; }
+</style>
+</head>
+<body>
+
+  <h1>Period Pass</h1>
+  <p class="sub">Attendance at IIT Tirupati</p>
+
+  <nav>
+    <!-- Students first: the largest group by two orders of magnitude, and the one most likely
+         to be opening this on a phone with thirty seconds to spare before a class. -->
+    <a class="role" href="pass.html">
+      <span class="icon" aria-hidden="true">▣</span>
+      <span><span class="label">Student</span><br>
+      <span class="hint">Your pass</span></span>
+    </a>
+
+    <!-- scanner.html, renamed from index.html because GitHub Pages has NO directory-index
+         setting: it always serves index.html at a folder root and there is no way to point that
+         at another file. On a server you would leave the scanner alone and add one line of
+         config; on Pages the rename is the only route.
+         manifest.webmanifest's start_url moved in the same change. Anyone who installed the
+         scanner as an app BEFORE this must reinstall — see HOSTING.md. -->
+    <a class="role" href="scanner.html">
+      <span class="icon" aria-hidden="true">◎</span>
+      <span><span class="label">Volunteer (TA)</span><br>
+      <span class="hint">Scan passes</span></span>
+    </a>
+
+    <a class="role" href="faculty.html">
+      <span class="icon" aria-hidden="true">◫</span>
+      <span><span class="label">Instructor</span><br>
+      <span class="hint">Your courses and their volunteers</span></span>
+    </a>
+
+    <a class="role" href="admin.html">
+      <span class="icon" aria-hidden="true">⚙</span>
+      <span><span class="label">Office</span><br>
+      <span class="hint">Timetable and all courses</span></span>
+    </a>
+  </nav>
+
+  <footer>
+    Sign in with your institute Google account on the page you pick.
+    Nothing here identifies you.
+  </footer>
+
+</body>
+</html>
