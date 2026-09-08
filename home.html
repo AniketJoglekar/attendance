@@ -63,7 +63,10 @@
       <span class="hint">Your pass</span></span>
     </a>
 
-    <!-- The old entry point, unchanged. Anyone who bookmarked index.html still lands there. -->
+    <!-- index.html keeps its name. The PWA manifest declares start_url ./index.html, so the
+         scanner is an INSTALLED app on volunteers' phones — renaming it would point every
+         existing install at a 404. This page is served at "/" through the server's directory
+         index instead (see HOSTING.md), which costs a line of config and breaks nothing. -->
     <a class="role" href="index.html">
       <span class="icon" aria-hidden="true">◎</span>
       <span><span class="label">Volunteer (TA)</span><br>
