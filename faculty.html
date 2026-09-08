@@ -71,7 +71,11 @@
   // from Google rather than as a legible error here; the check below closes that gap.
   var CFG = window.PASS_CONFIG || {};
   var $ = function (id) { return document.getElementById(id); };
-  var state = { idToken: null, course: null };
+  // `started` guards against a rebuild. Google Identity calls the credential callback more
+  // than once — on load, and again when it refreshes the token with auto_select on — and each
+  // call used to rerun start(), repopulate both dropdowns and reload the panel. That is the
+  // list appearing to refresh several times before settling.
+  var state = { idToken: null, course: null, started: false };
 
   // Same shape as pass.js: text/plain avoids a CORS preflight, which Apps Script cannot answer.
   function api(payload) {
@@ -176,6 +180,20 @@
 
   function show(html) { $('body').innerHTML = html; }
 
+
+  // Bound ONCE, here, not inside the load path.
+  //
+  // It used to be added after every fetch of the student list, on a #body element that show()
+  // empties but never replaces — so the listeners accumulated. Choosing "All students" three
+  // times left three handlers on one row, and a click toggled the detail open, shut and open
+  // again. Delegation from a container that outlives its contents has to be attached once.
+  $('body').addEventListener('click', function (e) {
+    var tr = e.target.closest && e.target.closest('tr.flagged');
+    if (!tr) return;
+    var d = $('d' + tr.getAttribute('data-i'));
+    if (d) d.classList.toggle('hidden');
+  });
+
   function load() {
     var who = $('who').value;
     show('<p class="muted">Loading\u2026</p>');
@@ -183,12 +201,6 @@
       api({ action: 'facultyStudents', course: state.course }).then(function (r) {
         if (!r.ok) return show('<p class="muted">' + esc(r.message) + '</p>');
         show(studentsView(r));
-        $('body').addEventListener('click', function (e) {
-          var tr = e.target.closest('tr.flagged');
-          if (!tr) return;
-          var d = $('d' + tr.getAttribute('data-i'));
-          if (d) d.classList.toggle('hidden');
-        });
       });
     } else {
       api({ action: 'facultyTaDetail', course: state.course, volunteer: who })
@@ -233,7 +245,20 @@
     });
   }
 
-  function onCredential(resp) { state.idToken = resp.credential; start(); }
+  // Google Identity can call this more than once for a single visit — auto_select fires it on
+  // load, and One Tap can fire it again. Each call re-ran start(), which re-fetched the course
+  // list, re-bound the dropdowns and re-loaded the panel: the list visibly reloading two or
+  // three times for no reason the operator could see.
+  //
+  // The token is always taken, because a later credential is the fresher one. Only the page
+  // build is guarded.
+  var started = false;
+  function onCredential(resp) {
+    state.idToken = resp.credential;
+    if (started) return;
+    started = true;
+    start();
+  }
 
   function initGsi() {
     // Say what is wrong HERE. Without this, a missing or misnamed config surfaces as a Google
