@@ -83,7 +83,22 @@
   var state = { idToken: null, course: null, seq: 0 };
 
   // Same shape as pass.js: text/plain avoids a CORS preflight, which Apps Script cannot answer.
+  // Counts and names every call, so a duplicate can be identified rather than guessed at.
+  // Three are expected at startup: facultyCourses, facultyVolunteers, facultyStudents. A fourth
+  // line here says which action repeated, which is the one fact the network tab cannot give —
+  // every request looks identical there, because Apps Script answers each POST with a 302 to
+  // the same /echo endpoint.
+  //
+  // console.debug, not console.log: invisible unless the level is turned up, so it costs
+  // nothing in normal use and is there when it is needed.
+  var apiCalls = 0;
   function api(payload) {
+    apiCalls++;
+    try {
+      console.debug('[period-pass] #' + apiCalls + ' ' + payload.action +
+        (payload.course ? ' course=' + payload.course : '') +
+        (payload.volunteer ? ' volunteer=' + payload.volunteer : ''));
+    } catch (e) {}
     payload.idToken = state.idToken;
     return fetch(CFG.EXEC_URL, {
       method: 'POST',
@@ -201,6 +216,7 @@
 
   function load() {
     var who = $('who').value;
+    try { console.debug('[period-pass] load() who=' + who); } catch (e) {}
     var mine = ++state.seq;
     // Stale responses are dropped rather than painted. Nothing cancels an in-flight fetch, so
     // this is the only thing standing between a slow earlier reply and it overwriting a newer
@@ -224,6 +240,7 @@
   }
 
   function loadWho() {
+    try { console.debug('[period-pass] loadWho()'); } catch (e) {}
     api({ action: 'facultyVolunteers', course: state.course }).then(function (r) {
       var opts = '<option value="__students">All students</option>';
       if (r.ok) {
@@ -241,6 +258,7 @@
   }
 
   function start() {
+    try { console.debug('[period-pass] start()'); } catch (e) {}
     api({ action: 'facultyCourses' }).then(function (r) {
       if (!r.ok) {
         $('signin').classList.remove('hidden');
@@ -273,6 +291,7 @@
   // build is guarded.
   var started = false;
   function onCredential(resp) {
+    try { console.debug('[period-pass] credential callback, started=' + started); } catch (e) {}
     state.idToken = resp.credential;
     if (started) return;
     started = true;
