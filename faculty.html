@@ -71,11 +71,16 @@
   // from Google rather than as a legible error here; the check below closes that gap.
   var CFG = window.PASS_CONFIG || {};
   var $ = function (id) { return document.getElementById(id); };
-  // `started` guards against a rebuild. Google Identity calls the credential callback more
-  // than once — on load, and again when it refreshes the token with auto_select on — and each
-  // call used to rerun start(), repopulate both dropdowns and reload the panel. That is the
-  // list appearing to refresh several times before settling.
-  var state = { idToken: null, course: null, started: false };
+  // `started` lives beside onCredential, not here — an earlier edit left a second unused copy
+  // on `state`, which is exactly the sort of thing that makes a guard look present twice and
+  // implemented neither time.
+  //
+  // `seq` numbers every panel load. A response only paints if it is still the newest request:
+  // switching volunteer, or volunteer then All students, fires two fetches, and Apps Script
+  // does not guarantee they return in order. Without this the slower first response repaints
+  // over the second — the panel showing correct content, then replacing it with stale content,
+  // which looks exactly like an unexplained reload.
+  var state = { idToken: null, course: null, seq: 0 };
 
   // Same shape as pass.js: text/plain avoids a CORS preflight, which Apps Script cannot answer.
   function api(payload) {
@@ -196,15 +201,23 @@
 
   function load() {
     var who = $('who').value;
+    var mine = ++state.seq;
+    // Stale responses are dropped rather than painted. Nothing cancels an in-flight fetch, so
+    // this is the only thing standing between a slow earlier reply and it overwriting a newer
+    // one after the fact.
+    var fresh = function () { return mine === state.seq; };
+
     show('<p class="muted">Loading\u2026</p>');
     if (who === '__students') {
       api({ action: 'facultyStudents', course: state.course }).then(function (r) {
+        if (!fresh()) return;
         if (!r.ok) return show('<p class="muted">' + esc(r.message) + '</p>');
         show(studentsView(r));
       });
     } else {
       api({ action: 'facultyTaDetail', course: state.course, volunteer: who })
         .then(function (r) {
+          if (!fresh()) return;
           show(r.ok ? taView(r) : '<p class="muted">' + esc(r.message) + '</p>');
         });
     }
@@ -219,7 +232,10 @@
             (v.level !== 'normal' ? ' \u2014 ' + esc(v.level) : '') + '</option>';
         }).join('');
       }
+      // Assigned BEFORE the handler is attached, so replacing the options cannot leave a
+      // half-built select visible while a load is already running against it.
       $('who').innerHTML = opts;
+      $('who').onchange = load;
       load();
     });
   }
@@ -240,7 +256,10 @@
       }).join('');
       state.course = r.courses[0].code;
       $('course').onchange = function () { state.course = this.value; loadWho(); };
-      $('who').onchange = load;
+      // `who`'s handler is attached in loadWho, next to the options it belongs with. Assigning
+      // it here as well was harmless — assignment overwrites rather than accumulating, unlike
+      // addEventListener — but two lines claiming the same responsibility is how one of them
+      // ends up edited and the other forgotten.
       loadWho();
     });
   }
