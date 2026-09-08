@@ -55,8 +55,8 @@
 
   <div id="app" class="hidden">
     <div class="bar">
-      <select id="course"></select>
-      <select id="who"></select>
+      <select id="course" autocomplete="off"></select>
+      <select id="who" autocomplete="off"></select>
     </div>
     <div id="body"></div>
   </div>
@@ -272,8 +272,23 @@
         return '<option value="' + esc(c.code) + '">' + esc(c.code) +
           (c.title ? ' \u2014 ' + esc(c.title) : '') + '</option>';
       }).join('');
-      state.course = r.courses[0].code;
-      $('course').onchange = function () { state.course = this.value; loadWho(); };
+      // Read the select AFTER the options exist, rather than assuming the first one.
+      //
+      // Chrome restores a previously selected value once the options are in place, and that
+      // restoration fires a real `change` event. Assuming courses[0] meant state.course said
+      // CY104L while the select said PH104L; the restoration then fired change, the handler
+      // reloaded everything, and the page fetched volunteers and students twice — the second
+      // pair being what looked like the list reloading after it had already appeared.
+      state.course = $('course').value || r.courses[0].code;
+
+      $('course').onchange = function () {
+        // Idempotent. A change event that does not change anything must not cost two requests,
+        // whatever fired it — restoration, autofill, or a browser reissuing form state on
+        // back-navigation. Cheaper and more robust than trying to suppress the event.
+        if (this.value === state.course) return;
+        state.course = this.value;
+        loadWho();
+      };
       // `who`'s handler is attached in loadWho, next to the options it belongs with. Assigning
       // it here as well was harmless — assignment overwrites rather than accumulating, unlike
       // addEventListener — but two lines claiming the same responsibility is how one of them

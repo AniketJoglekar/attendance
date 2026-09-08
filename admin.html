@@ -69,7 +69,9 @@
   var CFG = window.PASS_CONFIG || {};
   var $ = function (id) { return document.getElementById(id); };
   // `who` lived here and was read nowhere — loadPanel reads the select directly.
-  var state = { idToken: null, view: 'timetable', course: null };
+  // See faculty.html: Google Identity calls back more than once with auto_select on, and an
+  // unguarded start() rebuilds the page each time.
+  var state = { idToken: null, view: 'timetable', course: null, started: false };
 
   function api(p) {
     p.idToken = state.idToken;
@@ -193,7 +195,7 @@
   // Monitor courses — the faculty dashboard, unscoped.
   // --------------------------------------------------------------------------
   function coursesView() {
-    show('<select id="course"></select><select id="who" style="margin-left:10px"></select>' +
+    show('<select id="course" autocomplete="off"></select><select id="who" autocomplete="off" style="margin-left:10px"></select>' +
          '<div id="panel"></div>');
     api({ action: 'officeCourses' }).then(function (r) {
       if (!r.ok) return show('<p class="muted">' + esc(r.message) + '</p>');
@@ -202,8 +204,15 @@
           (c.title ? ' \u2014 ' + esc(c.title) : '') +
           (c.faculty ? '' : ' (no faculty listed)') + '</option>';
       }).join('');
-      state.course = r.courses.length ? r.courses[0].code : null;
-      $('course').onchange = function () { state.course = this.value; loadWho(); };
+      // See faculty.html: read the select after the options exist, and ignore a change event
+      // that changes nothing. Chrome's form restoration fires one, and it cost two extra
+      // round trips per page load.
+      state.course = $('course').value || (r.courses.length ? r.courses[0].code : null);
+      $('course').onchange = function () {
+        if (this.value === state.course) return;
+        state.course = this.value;
+        loadWho();
+      };
       loadWho();
     });
   }
@@ -311,7 +320,16 @@
     });
   }
 
-  function onCredential(resp) { state.idToken = resp.credential; start(); }
+  // See faculty.html: Google Identity can fire this more than once per visit, and each call
+  // re-ran start() — re-fetching, re-binding and re-rendering while the operator watched.
+  // The token is always taken; only the page build is guarded.
+  var started = false;
+  function onCredential(resp) {
+    state.idToken = resp.credential;
+    if (started) return;
+    started = true;
+    start();
+  }
 
   function initGsi() {
     // Say what is wrong HERE. Without this, a missing or misnamed config surfaces as a Google
