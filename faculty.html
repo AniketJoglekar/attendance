@@ -65,7 +65,11 @@
 <script>
 (function () {
   'use strict';
-  var CFG = window.PERIOD_PASS_CONFIG || {};
+  // window.PASS_CONFIG — the name config.js actually defines. This read PERIOD_PASS_CONFIG,
+  // a name that exists nowhere, so CFG fell back to {} and Google Identity was handed
+  // client_id: undefined. The `|| {}` is what made that fail as "Error 400: invalid_request"
+  // from Google rather than as a legible error here; the check below closes that gap.
+  var CFG = window.PASS_CONFIG || {};
   var $ = function (id) { return document.getElementById(id); };
   var state = { idToken: null, course: null };
 
@@ -232,6 +236,16 @@
   function onCredential(resp) { state.idToken = resp.credential; start(); }
 
   function initGsi() {
+    // Say what is wrong HERE. Without this, a missing or misnamed config surfaces as a Google
+    // error page about an invalid request, which sends the reader to Cloud Console to hunt an
+    // origin or consent problem that does not exist.
+    if (!CFG.CLIENT_ID || !CFG.EXEC_URL) {
+      $('signinError').textContent =
+        'config.js did not load, or is missing CLIENT_ID / EXEC_URL. This page cannot sign ' +
+        'in until it does \u2014 check config.js sits beside this file on the server.';
+      $('signinError').classList.remove('hidden');
+      return;
+    }
     if (!window.google || !google.accounts || !google.accounts.id) {
       setTimeout(initGsi, 200);
       return;
