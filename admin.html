@@ -68,7 +68,8 @@
   // from Google rather than as a legible error here; the check below closes that gap.
   var CFG = window.PASS_CONFIG || {};
   var $ = function (id) { return document.getElementById(id); };
-  var state = { idToken: null, view: 'timetable', course: null, who: '__students' };
+  // `who` lived here and was read nowhere — loadPanel reads the select directly.
+  var state = { idToken: null, view: 'timetable', course: null };
 
   function api(p) {
     p.idToken = state.idToken;
@@ -218,7 +219,7 @@
           return '<option value="' + esc(v.volunteer) + '">' + esc(v.volunteer) +
             (v.level !== 'normal' ? ' \u2014 ' + esc(v.level) : '') + '</option>';
         }).join('');
-      $('who').onchange = function () { state.who = this.value; loadPanel(); };
+      $('who').onchange = loadPanel;
       loadPanel();
     });
   }
