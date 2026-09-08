@@ -80,7 +80,7 @@
   // does not guarantee they return in order. Without this the slower first response repaints
   // over the second — the panel showing correct content, then replacing it with stale content,
   // which looks exactly like an unexplained reload.
-  var state = { idToken: null, course: null, seq: 0 };
+  var state = { idToken: null, course: null, seq: 0, shown: null };
 
   // Same shape as pass.js: text/plain avoids a CORS preflight, which Apps Script cannot answer.
   // Counts and names every call, so a duplicate can be identified rather than guessed at.
@@ -214,8 +214,23 @@
     if (d) d.classList.toggle('hidden');
   });
 
-  function load() {
+  function load(force) {
     var who = $('who').value;
+    var key = state.course + '|' + who;
+
+    // IDEMPOTENT, for the same reason the course handler is.
+    //
+    // loadWho() replaces this select's options and then calls load(). Chrome restores the
+    // select's previous value straight afterwards and fires `change`, which called load() a
+    // second time for the same course and the same volunteer — the panel drawing, showing
+    // "Loading" again, and drawing the identical list. autocomplete="off" does not reliably
+    // prevent restoration; refusing to repeat work does.
+    if (!force && key === state.shown) {
+      try { console.debug('[period-pass] load() skipped, unchanged: ' + key); } catch (e) {}
+      return;
+    }
+    state.shown = key;
+
     try { console.debug('[period-pass] load() who=' + who); } catch (e) {}
     var mine = ++state.seq;
     // Stale responses are dropped rather than painted. Nothing cancels an in-flight fetch, so
@@ -241,6 +256,15 @@
 
   function loadWho() {
     try { console.debug('[period-pass] loadWho()'); } catch (e) {}
+
+    // Disabled and labelled while it fills. An empty enabled select opens as a bare stub, which
+    // reads as broken rather than busy — and a click on it during that window is a change event
+    // on an empty list.
+    var w = $('who');
+    w.disabled = true;
+    w.innerHTML = '<option>Loading volunteers\u2026</option>';
+    state.shown = null;                 // the panel below is about to be about a different course
+
     api({ action: 'facultyVolunteers', course: state.course }).then(function (r) {
       var opts = '<option value="__students">All students</option>';
       if (r.ok) {
@@ -251,9 +275,12 @@
       }
       // Assigned BEFORE the handler is attached, so replacing the options cannot leave a
       // half-built select visible while a load is already running against it.
-      $('who').innerHTML = opts;
-      $('who').onchange = load;
-      load();
+      w.innerHTML = opts;
+      w.disabled = false;
+      w.onchange = function () { load(); };
+      // force: this is a new course, so the panel must redraw even if the volunteer selection
+      // happens to carry the same value as before.
+      load(true);
     });
   }
 

@@ -221,6 +221,13 @@
   // the office has no course scope by definition and the faculty endpoints would refuse a course
   // this account does not teach.
   function loadWho() {
+    // Busy, not broken: an empty enabled select opens as a bare stub while the request is in
+    // flight, and a click in that window is a change event on an empty list.
+    var w = $('who');
+    w.disabled = true;
+    w.innerHTML = '<option>Loading volunteers\u2026</option>';
+    state.shown = null;
+
     api({ action: 'officeVolunteers', course: state.course }).then(function (r) {
       if (!r.ok) { $('panel').innerHTML = '<p class="muted">' + esc(r.message) + '</p>'; return; }
       $('who').innerHTML = '<option value="__students">All students</option>' +
@@ -228,13 +235,20 @@
           return '<option value="' + esc(v.volunteer) + '">' + esc(v.volunteer) +
             (v.level !== 'normal' ? ' \u2014 ' + esc(v.level) : '') + '</option>';
         }).join('');
-      $('who').onchange = loadPanel;
-      loadPanel();
+      w.disabled = false;
+      w.onchange = function () { loadPanel(); };
+      loadPanel(true);      // new course: redraw even if the volunteer value is unchanged
     });
   }
 
-  function loadPanel() {
+  function loadPanel(force) {
     var who = $('who').value;
+    var key = state.course + '|' + who;
+    // See faculty.html: replacing this select's options makes Chrome restore the previous value
+    // and fire `change`, which redrew the identical panel a second time.
+    if (!force && key === state.shown) return;
+    state.shown = key;
+
     $('panel').innerHTML = '<p class="muted">Loading\u2026</p>';
     if (who === '__students') {
       api({ action: 'officeStudents', course: state.course }).then(function (r) {
