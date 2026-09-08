@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Period Pass — Office</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="config.js"></script>
+<style>
+  :root { --ink:#1a1a1a; --muted:#5b5b5b; --line:#e2e2e2; --bg:#fbfbfa; --accent:#0b5fff;
+          --normal:#2e9e5b; --medium:#d9a406; --high:#e2711d; --critical:#cf3025; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system,
+         BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         padding:20px calc(16px + env(safe-area-inset-left)) 40px; }
+  .wrap { max-width:1000px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 2px; }
+  .sub { color:var(--muted); font-size:13px; margin:0 0 18px; }
+  .hidden { display:none !important; }
+  .tabs { display:flex; gap:8px; margin-bottom:16px; }
+  button { font:inherit; padding:9px 16px; border:1px solid var(--line); border-radius:8px;
+           background:#fff; cursor:pointer; }
+  button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.small { padding:5px 10px; font-size:13px; }
+  button.danger { color:var(--critical); border-color:#f0c6c2; }
+  select { font:inherit; padding:9px 12px; border:1px solid var(--line); border-radius:8px;
+           background:#fff; min-width:200px; margin-bottom:14px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px;
+          margin-bottom:14px; }
+  .card h2 { font-size:15px; margin:0 0 2px; }
+  .why { color:var(--muted); font-size:12.5px; margin:0 0 12px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th { text-align:left; font-weight:600; color:var(--muted); font-size:12px;
+       border-bottom:1px solid var(--line); padding:6px 8px; }
+  td { padding:9px 8px; border-bottom:1px solid #f0f0f0; vertical-align:top; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px; }
+  .normal{background:var(--normal)} .medium{background:var(--medium)}
+  .high{background:var(--high)} .critical{background:var(--critical)}
+  .muted { color:var(--muted); }
+  tr.withdrawn td { opacity:.5; text-decoration:line-through; }
+  tr.withdrawn td:last-child { opacity:1; text-decoration:none; }
+  #signin { text-align:center; padding:60px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Office</h1>
+  <p class="sub">Every course. Sign in with an account listed in FORM_ADMINS.</p>
+
+  <div id="signin"><div id="gsiBtn"></div><p id="signinError" class="hidden muted"></p></div>
+
+  <div id="app" class="hidden">
+    <div class="tabs">
+      <button id="tabTimetable" class="on">Timetable</button>
+      <button id="tabCourses">Monitor courses</button>
+    </div>
+    <div id="body"></div>
+  </div>
+
+</div>
+<script>
+(function () {
+  'use strict';
+  var CFG = window.PERIOD_PASS_CONFIG || {};
+  var $ = function (id) { return document.getElementById(id); };
+  var state = { idToken: null, view: 'timetable', course: null, who: '__students' };
+
+  function api(p) {
+    p.idToken = state.idToken;
+    return fetch(CFG.EXEC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(p)
+    }).then(function (r) { return r.json(); });
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c];
+    });
+  }
+  function show(h) { $('body').innerHTML = h; }
+
+  // --------------------------------------------------------------------------
+  // Timetable — READ ONLY, deliberately.
+  //
+  // The Slot grid is the sheet that periodsOn_, clash resolution, the register and the risk
+  // evaluation all derive from. The office already edits it in the spreadsheet, where Google
+  // supplies version history, named revisions, undo and per-cell attribution for nothing. A web
+  // editor would be a second write path into that one sheet with none of it, and a confirm
+  // dialog is far weaker protection than being able to see who changed what and put it back.
+  // --------------------------------------------------------------------------
+  function timetableView(t) {
+    var grid = t.grid.map(function (g) {
+      return '<tr><td>' + esc(g.slot) + '</td><td>' + esc(g.days) + '</td><td>' +
+        esc(g.start) + '</td><td>' + esc(g.end) + '</td></tr>';
+    }).join('');
+
+    var today = t.periods.length
+      ? t.periods.map(function (p) {
+          return '<tr><td>' + esc(p.code) + '</td><td>' + esc(p.name) + '</td><td>' +
+            esc(p.start) + '\u2013' + esc(p.end) + '</td><td class="muted">' +
+            esc(p.origin) + '</td></tr>';
+        }).join('')
+      : '<tr><td colspan="4" class="muted">Nothing runs today.</td></tr>';
+
+    return '<div class="card"><h2>Slot grid</h2>' +
+      '<p class="why">' + esc(t.note) + '</p>' +
+      '<table><tr><th>Slot</th><th>Days</th><th>Start</th><th>End</th></tr>' + grid + '</table></div>' +
+      '<div class="card"><h2>Today \u2014 ' + esc(t.today) + '</h2>' +
+      '<p class="why">What the grid actually produced, after holidays, exceptions and clash ' +
+      'resolution. When somebody says the timetable is wrong, the disagreement between this ' +
+      'and the grid above is usually the answer.</p>' +
+      '<table><tr><th>Course</th><th>Name</th><th>Time</th><th>From</th></tr>' + today + '</table></div>' +
+      '<div class="card"><h2>Exceptions</h2><p class="why">Newest first. Loading\u2026</p>' +
+      '<div id="exceptions"></div></div>';
+  }
+
+  function exceptionsTable(rows) {
+    if (!rows.length) return '<p class="muted">None yet.</p>';
+    return '<table><tr><th>Entered</th><th>Date</th><th>Change</th><th>Verdict</th>' +
+      '<th>How it resolved</th><th></th></tr>' +
+      rows.map(function (r, i) {
+        var verdict = r.accepted
+          ? esc(r.accepted)
+          : '<span class="muted">typed into the sheet \u2014 no form outcome</span>';
+        return '<tr class="' + (r.withdrawn ? 'withdrawn' : '') + '">' +
+          '<td class="muted">' + esc(r.enteredAt) + '</td>' +
+          '<td>' + esc(r.date) + '</td>' +
+          '<td>' + esc(r.type) + ' ' + esc(r.code) + (r.slot ? ' ' + esc(r.slot) : '') +
+            (r.start ? ' ' + esc(r.start) + '\u2013' + esc(r.end) : '') + '</td>' +
+          '<td>' + verdict + '</td>' +
+          '<td class="muted" id="res' + i + '">' +
+            '<button class="small" data-res="' + i + '">How it resolved</button></td>' +
+          '<td><button class="small ' + (r.withdrawn ? '' : 'danger') + '" data-i="' + i + '">' +
+            (r.withdrawn ? 'Reinstate' : 'Withdraw') + '</button></td></tr>';
+      }).join('') + '</table>';
+  }
+
+  function loadExceptions() {
+    api({ action: 'officeExceptions' }).then(function (r) {
+      if (!r.ok) return;
+      var box = $('exceptions');
+      if (!box) return;
+      box.previousElementSibling.textContent = 'Newest first. Withdrawing removes a request ' +
+        'from the schedule without deleting the record \u2014 who asked and what was decided ' +
+        'stays, and it can be put back.';
+      box.innerHTML = exceptionsTable(r.rows);
+      box.onclick = function (e) {
+        // Resolution is fetched for the ONE row somebody opened. Computing it for every row
+        // costs a clashesOn_ and a periodsOn_ each — several hundred rebuilt days to display
+        // twenty.
+        var rb = e.target.closest('button[data-res]');
+        if (rb) {
+          var rr = r.rows[Number(rb.getAttribute('data-res'))];
+          rb.disabled = true; rb.textContent = 'Checking\u2026';
+          api({ action: 'officeResolution', date: rr.date, course: rr.code })
+            .then(function (res) {
+              $('res' + rb.getAttribute('data-res')).textContent =
+                (res.ok && res.resolution) ? res.resolution : 'Nothing recorded.';
+            });
+          return;
+        }
+        var b = e.target.closest('button[data-i]');
+        if (!b) return;
+        var row = r.rows[Number(b.getAttribute('data-i'))];
+        var undo = !!row.withdrawn;
+        // Confirmation on BOTH directions. Reinstating changes the schedule just as much as
+        // withdrawing, and an accidental reinstate at 08:55 is the same problem in reverse.
+        if (!window.confirm(
+          (undo ? 'Reinstate ' : 'Withdraw ') + row.type + ' ' + row.code + ' on ' + row.date +
+          '?\n\n' + (undo
+            ? 'The request will take effect again.'
+            : 'The schedule will behave as though this request was never made. The record ' +
+              'stays and you can put it back.'))) return;
+        b.disabled = true;
+        api({ action: 'officeWithdraw', row: row.row, expectCode: row.code,
+              expectType: row.type, expectDate: row.date }).then(function (res) {
+          if (!res.ok) { window.alert(res.message || 'Could not do that.'); b.disabled = false; return; }
+          loadExceptions();
+        });
+      };
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // Monitor courses — the faculty dashboard, unscoped.
+  // --------------------------------------------------------------------------
+  function coursesView() {
+    show('<select id="course"></select><select id="who" style="margin-left:10px"></select>' +
+         '<div id="panel"></div>');
+    api({ action: 'officeCourses' }).then(function (r) {
+      if (!r.ok) return show('<p class="muted">' + esc(r.message) + '</p>');
+      $('course').innerHTML = r.courses.map(function (c) {
+        return '<option value="' + esc(c.code) + '">' + esc(c.code) +
+          (c.title ? ' \u2014 ' + esc(c.title) : '') +
+          (c.faculty ? '' : ' (no faculty listed)') + '</option>';
+      }).join('');
+      state.course = r.courses.length ? r.courses[0].code : null;
+      $('course').onchange = function () { state.course = this.value; loadWho(); };
+      loadWho();
+    });
+  }
+
+  // The OFFICE variants, not the faculty ones. Same underlying data; a different gate, because
+  // the office has no course scope by definition and the faculty endpoints would refuse a course
+  // this account does not teach.
+  function loadWho() {
+    api({ action: 'officeVolunteers', course: state.course }).then(function (r) {
+      if (!r.ok) { $('panel').innerHTML = '<p class="muted">' + esc(r.message) + '</p>'; return; }
+      $('who').innerHTML = '<option value="__students">All students</option>' +
+        r.volunteers.map(function (v) {
+          return '<option value="' + esc(v.volunteer) + '">' + esc(v.volunteer) +
+            (v.level !== 'normal' ? ' \u2014 ' + esc(v.level) : '') + '</option>';
+        }).join('');
+      $('who').onchange = function () { state.who = this.value; loadPanel(); };
+      loadPanel();
+    });
+  }
+
+  function loadPanel() {
+    var who = $('who').value;
+    $('panel').innerHTML = '<p class="muted">Loading\u2026</p>';
+    if (who === '__students') {
+      api({ action: 'officeStudents', course: state.course }).then(function (r) {
+        $('panel').innerHTML = r.ok ? studentsView(r)
+                                    : '<p class="muted">' + esc(r.message) + '</p>';
+      });
+    } else {
+      api({ action: 'officeTaDetail', course: state.course, volunteer: who }).then(function (r) {
+        $('panel').innerHTML = r.ok ? taView(r)
+                                    : '<p class="muted">' + esc(r.message) + '</p>';
+      });
+    }
+  }
+
+  // Same rendering as the instructor page, and the same rule: the two histograms carry NO
+  // threat level, because neither has a measured threshold and the scan timeline has no
+  // detector behind it at all. Colour only what the risk evaluation produced.
+  function histogram(counts, labels) {
+    var max = Math.max.apply(null, counts.concat([1]));
+    return '<div class="bars">' + counts.map(function (c) {
+      return '<div style="height:' + Math.round((c / max) * 100) + '%" title="' + c + '"></div>';
+    }).join('') + '</div><div class="axis"><span>' + esc(labels[0]) + '</span><span>' +
+      esc(labels[1]) + '</span></div>';
+  }
+
+  function taView(d) {
+    var lat = d.photoLatency, tl = d.scanAligned || d.scanTimeline;
+    var html = '<div class="card"><h2>Photo check response times</h2><p class="why">' +
+      lat.checks + ' checks over ' + d.meetings + ' meetings. Unscored \u2014 no threshold ' +
+      'has been measured.</p>' + histogram(lat.counts, ['0s', '30s+']) + '</div>' +
+      '<div class="card"><h2>When scans happen</h2><p class="why">Minutes from this ' +
+      'volunteer\u2019s first scan of each meeting. A second cluster later is the shape of ' +
+      'passes worked through at a desk. No threshold \u2014 use it to decide when to ask for ' +
+      'the phone.</p>' + histogram(tl.counts.slice(0, 60), ['start', '60 min']) + '</div>';
+    if (d.flags && d.flags.length) {
+      html += '<div class="card"><h2>Flags</h2><table><tr><th></th><th>Level</th><th>Why</th></tr>' +
+        d.flags.map(function (f) {
+          return '<tr><td><span class="dot ' + esc(f.level) + '"></span></td><td>' +
+            esc(f.level) + '</td><td>' + esc(f.why) + '</td></tr>';
+        }).join('') + '</table></div>';
+    }
+    return html;
+  }
+
+  function studentsView(d) {
+    return '<div class="card"><h2>Students</h2><p class="why">Click a flagged row for the ' +
+      'reason \u2014 the reason is the finding, not the colour.</p><table>' +
+      '<tr><th>Roll</th><th>Name</th><th>Attendance</th><th>Why</th></tr>' +
+      d.students.map(function (s) {
+        var att = (s.attendancePct === null || s.attendancePct === undefined)
+          ? '<span class="muted">not rolled up</span>'
+          : s.attendancePct + '% <span class="muted">(' + s.present + '/' + s.held + ')</span>';
+        return '<tr><td><span class="dot ' + esc(s.level) + '"></span>' + esc(s.roll) +
+          '</td><td>' + esc(s.name) + '</td><td>' + att + '</td><td class="muted">' +
+          esc(s.why || '') + '</td></tr>';
+      }).join('') + '</table></div>';
+  }
+
+  function render() {
+    $('tabTimetable').classList.toggle('on', state.view === 'timetable');
+    $('tabCourses').classList.toggle('on', state.view === 'courses');
+    if (state.view === 'courses') return coursesView();
+    show('<p class="muted">Loading\u2026</p>');
+    api({ action: 'officeTimetable' }).then(function (r) {
+      if (!r.ok) return show('<p class="muted">' + esc(r.message) + '</p>');
+      show(timetableView(r));
+      loadExceptions();
+    });
+  }
+
+  function start() {
+    api({ action: 'officeTimetable' }).then(function (r) {
+      if (!r.ok) {
+        $('signinError').textContent = r.message || 'Not authorised.';
+        $('signinError').classList.remove('hidden');
+        return;
+      }
+      $('signin').classList.add('hidden');
+      $('app').classList.remove('hidden');
+      $('tabTimetable').onclick = function () { state.view = 'timetable'; render(); };
+      $('tabCourses').onclick = function () { state.view = 'courses'; render(); };
+      render();
+    });
+  }
+
+  function onCredential(resp) { state.idToken = resp.credential; start(); }
+
+  function initGsi() {
+    if (!window.google || !google.accounts || !google.accounts.id) {
+      setTimeout(initGsi, 200); return;
+    }
+    try {
+      google.accounts.id.initialize({
+        client_id: CFG.CLIENT_ID, callback: onCredential, auto_select: true });
+      google.accounts.id.renderButton($('gsiBtn'),
+        { theme: 'filled_blue', size: 'large', text: 'signin_with', width: 260 });
+    } catch (e) {
+      $('signinError').textContent = 'Sign-in could not start.';
+      $('signinError').classList.remove('hidden');
+    }
+  }
+  initGsi();
+})();
+</script>
+</body>
+</html>

@@ -535,7 +535,11 @@
       // guess — spending it on network latency produces exactly the rushed answers the timer
       // is meant to prevent. The course is not carried at all: the server wrote it on the
       // ASKED row and joins the two by scan id.
-      deadline: null
+      deadline: null,
+      // Set on the same line as the deadline, when the photograph is actually on screen. This
+      // is the only place in the system that knows when the volunteer could first have looked
+      // at it — the server sees a round trip either side and can only bound it.
+      shownAt: null
     };
     state.scanning = false;
 
@@ -551,7 +555,9 @@
       $('checkAsk').textContent = 'Check this face against the person in front of you.';
       $('checkYes').disabled = false;
       $('checkNo').disabled = false;
-      state.check.deadline = Date.now() + (state.photoCheckWindowMs || CFG.PHOTO_CHECK_WINDOW_MS || 30000);
+      state.check.shownAt = Date.now();
+      state.check.deadline = state.check.shownAt +
+        (state.photoCheckWindowMs || CFG.PHOTO_CHECK_WINDOW_MS || 30000);
       tick();
     }).catch(function () {
       if (!state.check) return;
@@ -593,7 +599,13 @@
 
     // Fire and forget: the answer must not hold up scanning, and a failed send is visible
     // afterwards as an ASKED row with no outcome.
-    api('verify', { roll: c.roll, answer: answer, id: c.id, ticket: c.ticket })
+    // Elapsed, not a wall-clock time. A duration needs no agreement about what time it is,
+    // so a device with a wrong clock still reports a usable number — and it says nothing about
+    // when the volunteer was working, which a timestamp would.
+    var elapsedMs = c.shownAt ? Date.now() - c.shownAt : null;
+
+    api('verify', { roll: c.roll, answer: answer, id: c.id, ticket: c.ticket,
+                    elapsedMs: elapsedMs })
       .catch(function () { /* the gap in the trail is the record */ });
 
     clearVerdict();
@@ -961,7 +973,9 @@
     if (!v.photoTicket) return Promise.reject(new Error('No photo available for this scan.'));
 
     // api() resolves to the PARSED body, not a Response — resp.ok is the server's own flag.
-    return api('photo', { roll: v.roll, ticket: v.photoTicket }).then(function (resp) {
+    // The scan id travels with the photo request so the server can match it to the check it
+    // issued. The client neither knows nor can learn what the server does with it.
+    return api('photo', { roll: v.roll, ticket: v.photoTicket, id: v.id }).then(function (resp) {
       if (!resp.ok) {
         if (resp.error === 'TOKEN_EXPIRED' || resp.error === 'TOKEN_INVALID') requireReauth();
         throw new Error(resp.message || 'Photo unavailable.');

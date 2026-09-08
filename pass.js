@@ -79,8 +79,13 @@
     // page at staggered times — four hundred requests arriving in the same second, every
     // minute, forever. A random spread turns that into a flat trickle, and it is the single
     // highest-leverage line in this file for surviving a full cohort.
-    var jitter = Math.floor(Math.random() * 4000);
-    state.timer = setTimeout(refresh, Math.max(1500, ms - 2000 - jitter));
+    // Proportional to the window, not a fixed four seconds. At a 60-second code that constant
+    // was a 7% spread; at 15 seconds it would be 27%, and at anything shorter the jitter plus
+    // the safety margin would exceed the code's whole life and every refresh would hit the
+    // floor below — the herd this line exists to break would re-form.
+    var jitter = Math.floor(Math.random() * Math.max(1000, ms * 0.25));
+    var lead = Math.max(1000, ms * 0.15);
+    state.timer = setTimeout(refresh, Math.max(1500, ms - lead - jitter));
   }
 
   function refresh() {
@@ -108,7 +113,24 @@
       $('name').textContent = r.name || '';
       draw(r.code);
       show('card');
-      countdown(r.expiresInMs || 60000);
+
+      // Branch on `kind`, never on which timing field happens to be present. The server decides
+      // which pass this student may hold today; the page has no opinion and no way to prefer
+      // one — that is what stops a printed pass being reachable on a dynamic day.
+      if (r.kind === 'static') {
+        // A printed pass does not expire, so no countdown. The re-ask is about the OFFICE
+        // declaring a dynamic day while this page sits in a pocket: without it a student who
+        // opened the page at 08:50 would present a perfectly rendered, silently dead QR at
+        // 09:05 and the volunteer would see what looks like tampering.
+        $('ttl').textContent = 'Your usual pass — same as your card';
+        clearTimeout(state.timer);
+        state.timer = setTimeout(refresh, r.recheckInMs || 300000);
+        return;
+      }
+
+      // 15000 matches the default rotating TTL. A 60000 fallback here would have shown a
+      // countdown four times the code's real life if the field ever went missing.
+      countdown(r.expiresInMs || 15000);
     }).catch(function () {
       $('ttl').textContent = 'no signal — retrying';
       // Keep trying rather than giving up: the student may be in a hall with poor reception

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Period Pass — Instructor</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="config.js"></script>
+<style>
+  :root { --ink:#1a1a1a; --muted:#5b5b5b; --line:#e2e2e2; --bg:#fbfbfa; --accent:#0b5fff;
+          --normal:#2e9e5b; --medium:#d9a406; --high:#e2711d; --critical:#cf3025; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system,
+         BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         padding:20px calc(16px + env(safe-area-inset-left)) 40px; }
+  .wrap { max-width:960px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 2px; }
+  .sub { color:var(--muted); font-size:13px; margin:0 0 20px; }
+  .hidden { display:none !important; }
+  .bar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
+  select { font:inherit; padding:9px 12px; border:1px solid var(--line); border-radius:8px;
+           background:#fff; min-width:190px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px;
+          margin-bottom:14px; }
+  .card h2 { font-size:15px; margin:0 0 2px; }
+  .card .why { color:var(--muted); font-size:12.5px; margin:0 0 12px; }
+  .panels { display:grid; gap:14px; grid-template-columns:1fr; }
+  @media (min-width:760px) { .panels { grid-template-columns:1fr 1fr; } }
+  .bars { display:flex; align-items:flex-end; gap:2px; height:130px; margin-top:8px; }
+  .bars div { flex:1; background:var(--accent); min-height:1px; border-radius:2px 2px 0 0; }
+  .axis { display:flex; justify-content:space-between; color:var(--muted); font-size:11px;
+          margin-top:4px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th { text-align:left; font-weight:600; color:var(--muted); font-size:12px;
+       border-bottom:1px solid var(--line); padding:6px 8px; }
+  td { padding:9px 8px; border-bottom:1px solid #f0f0f0; vertical-align:top; }
+  tr.flagged { cursor:pointer; }
+  tr.flagged:hover { background:#f7f9ff; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px; }
+  .normal{background:var(--normal)} .medium{background:var(--medium)}
+  .high{background:var(--high)} .critical{background:var(--critical)}
+  .detail td { color:var(--muted); font-size:13px; background:#fafbfe; }
+  .muted { color:var(--muted); }
+  .warn { background:#fff8e6; border-color:#f0dca0; }
+  #signin { text-align:center; padding:60px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Instructor</h1>
+  <p class="sub">Your courses only. Sign in with your institute account.</p>
+
+  <div id="signin"><div id="gsiBtn"></div><p id="signinError" class="hidden muted"></p></div>
+
+  <div id="app" class="hidden">
+    <div class="bar">
+      <select id="course"></select>
+      <select id="who"></select>
+    </div>
+    <div id="body"></div>
+  </div>
+
+</div>
+<script>
+(function () {
+  'use strict';
+  var CFG = window.PERIOD_PASS_CONFIG || {};
+  var $ = function (id) { return document.getElementById(id); };
+  var state = { idToken: null, course: null };
+
+  // Same shape as pass.js: text/plain avoids a CORS preflight, which Apps Script cannot answer.
+  function api(payload) {
+    payload.idToken = state.idToken;
+    return fetch(CFG.EXEC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload)
+    }).then(function (r) { return r.json(); });
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c];
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // Histograms
+  //
+  // Drawn WITHOUT a threat level, and that is not an oversight. Neither of these has a measured
+  // threshold: the photo-response one has never been calibrated against real volunteers, and the
+  // scan timeline has no detector behind it at all — the agreed answer to a volunteer working a
+  // stack of passes at their desk is an unannounced check of their phone, and this chart exists
+  // to say when to run one. A colour here would be a confident accusation with nothing behind
+  // it, and an instructor shown a colour acts on the colour.
+  // --------------------------------------------------------------------------
+  function histogram(counts, labels) {
+    var max = Math.max.apply(null, counts.concat([1]));
+    var bars = counts.map(function (c) {
+      return '<div style="height:' + Math.round((c / max) * 100) + '%" title="' + c + '"></div>';
+    }).join('');
+    return '<div class="bars">' + bars + '</div><div class="axis"><span>' +
+      esc(labels[0]) + '</span><span>' + esc(labels[1]) + '</span></div>';
+  }
+
+  function taView(d) {
+    var lat = d.photoLatency, tl = d.scanAligned || d.scanTimeline;
+    var firsts = (tl.firstScanMinutes || []);
+    var html =
+      '<div class="panels">' +
+        '<div class="card"><h2>Photo check response times</h2>' +
+          '<p class="why">' + lat.checks + ' checks over ' + d.meetings + ' meetings. ' +
+          'Unscored — no threshold has been measured. The left-most bar is under half a ' +
+          'second, which is faster than looking at a face allows.</p>' +
+          histogram(lat.counts, ['0s', '30s+']) +
+        '</div>' +
+        '<div class="card"><h2>When scans happen</h2>' +
+          '<p class="why">Minutes from this volunteer\u2019s first scan of each meeting, summed ' +
+          'over ' + tl.meetings + '. A second cluster later on is worth a look \u2014 it is ' +
+          'the shape of passes worked through at a desk. No threshold: use it to decide when ' +
+          'to ask for the phone.</p>' +
+          histogram(tl.counts.slice(0, 60), ['start', '60 min']) +
+          (firsts.length ? '<p class="why">First scan each meeting, minutes in: ' +
+            esc(firsts.join(', ')) + '</p>' : '') +
+        '</div>' +
+      '</div>';
+
+    if (d.plants && d.plants.total) {
+      html += '<div class="card' + (d.plants.total > d.plants.looked ? ' warn' : '') + '">' +
+        '<h2>Planted checks</h2><p class="why">Looked properly at ' + d.plants.looked +
+        ' of ' + d.plants.total + '. Counts, not a rate \u2014 one missed plant means little, ' +
+        'because two students on a course can genuinely resemble each other.</p></div>';
+    }
+
+    html += '<div class="card"><h2>Flags</h2>';
+    if (!d.flags.length) {
+      html += '<p class="why">None. Levels come only from the risk evaluation, which has ' +
+              'arithmetic behind it \u2014 unlike the charts above.</p>';
+    } else {
+      html += '<table><tr><th></th><th>Level</th><th>Why</th><th>Raised</th></tr>' +
+        d.flags.map(function (f) {
+          return '<tr><td><span class="dot ' + esc(f.level) + '"></span></td><td>' +
+            esc(f.level) + '</td><td>' + esc(f.why) + '</td><td class="muted">' +
+            esc(f.at) + '</td></tr>';
+        }).join('') + '</table>';
+    }
+    return html + '</div>';
+  }
+
+  function studentsView(d) {
+    var rows = d.students.map(function (s, i) {
+      // Attendance is null when the register has not been rolled up. Showing 0% there would
+      // read as "attended nothing", which is a different and alarming claim.
+      var att = s.attendancePct === null || s.attendancePct === undefined
+        ? '<span class="muted">not rolled up</span>'
+        : s.attendancePct + '% <span class="muted">(' + s.present + '/' + s.held + ')</span>';
+      var flagged = s.level && s.level !== 'normal';
+      return '<tr class="' + (flagged ? 'flagged' : '') + '" data-i="' + i + '">' +
+        '<td><span class="dot ' + esc(s.level) + '"></span>' + esc(s.roll) + '</td>' +
+        '<td>' + esc(s.name) + '</td><td>' + att + '</td></tr>' +
+        (flagged ? '<tr class="detail hidden" id="d' + i + '"><td colspan="3">' +
+          esc(s.why) + (s.volunteer ? ' \u2014 volunteer: ' + esc(s.volunteer) : '') +
+          '</td></tr>' : '');
+    }).join('');
+
+    return '<div class="card"><h2>Students</h2>' +
+      '<p class="why">Green normal, amber medium, orange high, red critical. Click a flagged ' +
+      'row for the reason it was raised \u2014 the reason is the finding, not the colour.</p>' +
+      '<table><tr><th>Roll</th><th>Name</th><th>Attendance</th></tr>' + rows + '</table></div>';
+  }
+
+  function show(html) { $('body').innerHTML = html; }
+
+  function load() {
+    var who = $('who').value;
+    show('<p class="muted">Loading\u2026</p>');
+    if (who === '__students') {
+      api({ action: 'facultyStudents', course: state.course }).then(function (r) {
+        if (!r.ok) return show('<p class="muted">' + esc(r.message) + '</p>');
+        show(studentsView(r));
+        $('body').addEventListener('click', function (e) {
+          var tr = e.target.closest('tr.flagged');
+          if (!tr) return;
+          var d = $('d' + tr.getAttribute('data-i'));
+          if (d) d.classList.toggle('hidden');
+        });
+      });
+    } else {
+      api({ action: 'facultyTaDetail', course: state.course, volunteer: who })
+        .then(function (r) {
+          show(r.ok ? taView(r) : '<p class="muted">' + esc(r.message) + '</p>');
+        });
+    }
+  }
+
+  function loadWho() {
+    api({ action: 'facultyVolunteers', course: state.course }).then(function (r) {
+      var opts = '<option value="__students">All students</option>';
+      if (r.ok) {
+        opts += r.volunteers.map(function (v) {
+          return '<option value="' + esc(v.volunteer) + '">' + esc(v.volunteer) +
+            (v.level !== 'normal' ? ' \u2014 ' + esc(v.level) : '') + '</option>';
+        }).join('');
+      }
+      $('who').innerHTML = opts;
+      load();
+    });
+  }
+
+  function start() {
+    api({ action: 'facultyCourses' }).then(function (r) {
+      if (!r.ok) {
+        $('signin').classList.remove('hidden');
+        $('signinError').textContent = r.message || 'Not listed as faculty for any course.';
+        $('signinError').classList.remove('hidden');
+        return;
+      }
+      $('signin').classList.add('hidden');
+      $('app').classList.remove('hidden');
+      $('course').innerHTML = r.courses.map(function (c) {
+        return '<option value="' + esc(c.code) + '">' + esc(c.code) +
+          (c.title ? ' \u2014 ' + esc(c.title) : '') + '</option>';
+      }).join('');
+      state.course = r.courses[0].code;
+      $('course').onchange = function () { state.course = this.value; loadWho(); };
+      $('who').onchange = load;
+      loadWho();
+    });
+  }
+
+  function onCredential(resp) { state.idToken = resp.credential; start(); }
+
+  function initGsi() {
+    if (!window.google || !google.accounts || !google.accounts.id) {
+      setTimeout(initGsi, 200);
+      return;
+    }
+    try {
+      google.accounts.id.initialize({
+        client_id: CFG.CLIENT_ID, callback: onCredential, auto_select: true
+      });
+      google.accounts.id.renderButton($('gsiBtn'),
+        { theme: 'filled_blue', size: 'large', text: 'signin_with', width: 260 });
+    } catch (e) {
+      $('signinError').textContent = 'Sign-in could not start. Tell the office.';
+      $('signinError').classList.remove('hidden');
+    }
+  }
+
+  initGsi();
+})();
+</script>
+</body>
+</html>
