@@ -246,7 +246,17 @@
     w.disabled = false;
     w.onchange = function () { loadPanel(); };
     state.shown = state.course + '|__students';
+    state.students = r.students;
     $('panel').innerHTML = studentsView({ students: r.students });
+
+    // Attendance comes WITH the bootstrap, not in a call of its own.
+    //
+    // It was split out to get the list on screen sooner: opening the register costs 490-833ms.
+    // Measured, the extra request cost 4604-5482ms, because an Apps Script round trip is
+    // 3.5-4.5 SECONDS regardless of what it carries — the server work inside it was 22ms.
+    // Trading 800ms of reading for a whole round trip lost about four seconds per course.
+    //
+    // The rule: never split work out of a request to make that request faster. Only merge.
   }
 
   // The OFFICE variants, not the faculty ones. Same underlying data; a different gate, because
