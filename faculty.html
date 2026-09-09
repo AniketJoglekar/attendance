@@ -114,6 +114,7 @@
   var apiCalls = 0;
   function api(payload) {
     apiCalls++;
+    var sent = Date.now();
     try {
       console.debug('[period-pass] #' + apiCalls + ' ' + payload.action +
         (payload.course ? ' course=' + payload.course : '') +
@@ -124,7 +125,20 @@
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload)
-    }).then(function (r) { return r.json(); });
+    }).then(function (r) { return r.json(); })
+      .then(function (r) {
+        // Total minus server = the Apps Script overhead: invocation, the 302, and the second
+        // hop to /echo. Reported side by side, because they need different fixes and only one
+        // of them is ours.
+        try {
+          var total = Date.now() - sent;
+          var srv = r && r.ms ? JSON.stringify(r.ms) : 'n/a';
+          console.debug('[period-pass] ' + payload.action + ' total=' + total +
+                        'ms server=' + srv + ' overhead=' +
+                        (r && r.ms && r.ms.students ? (total - r.ms.students) : '?') + 'ms');
+        } catch (e) {}
+        return r;
+      });
   }
 
   function esc(s) {
