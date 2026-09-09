@@ -185,6 +185,11 @@
         api({ action: 'officeWithdraw', row: row.row, expectCode: row.code,
               expectType: row.type, expectDate: row.date }).then(function (res) {
           if (!res.ok) { window.alert(res.message || 'Could not do that.'); b.disabled = false; return; }
+          // The schedule just changed, so every cached course view is stale — not only this
+          // one, because a withdrawal can free a clash that was dropping a different course's
+          // class. Cheaper to discard the lot than to reason about which.
+          state.boot = {};
+          state.shown = null;
           loadExceptions();
         });
       };
@@ -194,13 +199,19 @@
   // --------------------------------------------------------------------------
   // Monitor courses — the faculty dashboard, unscoped.
   // --------------------------------------------------------------------------
+  function bootstrap(course, force) {
+    if (!force && course && state.boot[course]) return Promise.resolve(state.boot[course]);
+    return api({ action: 'officeBootstrap', course: course || undefined })
+      .then(function (r) { if (r.ok) state.boot[r.course] = r; return r; });
+  }
+
   function coursesView() {
     show('<select id="course" autocomplete="off"></select><select id="who" autocomplete="off" style="margin-left:10px"></select>' +
          '<div id="panel"></div>');
     // ONE round trip: courses, volunteers and students together. See faculty.html — each Apps
     // Script call costs one to two seconds of round trip regardless of the handler, and three
     // in sequence was the latency.
-    api({ action: 'officeBootstrap' }).then(function (r) {
+    bootstrap(null, true).then(function (r) {
       if (!r.ok) return show('<p class="muted">' + esc(r.message) + '</p>');
       $('course').innerHTML = r.courses.map(function (c) {
         return '<option value="' + esc(c.code) + '"' +
@@ -252,7 +263,7 @@
     // One call again: volunteers AND the student list for the new course. The option-building
     // that stood here lives in paint(), which serves both the first load and every course
     // change — two copies of the same markup is how one ends up carrying a fix the other does not.
-    api({ action: 'officeBootstrap', course: state.course }).then(function (r) {
+    bootstrap(state.course).then(function (r) {
       if (!r.ok) { $('panel').innerHTML = '<p class="muted">' + esc(r.message) + '</p>'; return; }
       paint(r);
     });
@@ -357,6 +368,17 @@
   var started = false;
   function onCredential(resp) {
     state.idToken = resp.credential;
+
+    // A different account in the same tab must not see the previous one's cached views. The
+    // address is read from the token payload only to compare it with itself; nothing is
+    // authorised on it.
+    try {
+      var who = JSON.parse(atob(resp.credential.split('.')[1].replace(/-/g, '+')
+        .replace(/_/g, '/'))).email || null;
+      if (state.who && who !== state.who) { state.boot = {}; state.shown = null; }
+      state.who = who;
+    } catch (e) { state.boot = {}; }     // unreadable token: discard rather than assume
+
     if (started) return;
     started = true;
     start();

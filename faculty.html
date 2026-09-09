@@ -20,6 +20,9 @@
   .bar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
   select { font:inherit; padding:9px 12px; border:1px solid var(--line); border-radius:8px;
            background:#fff; min-width:190px; }
+  button { font:inherit; padding:9px 14px; border:1px solid var(--line); border-radius:8px;
+           background:#fff; cursor:pointer; }
+  button:active { background:#f2f4f8; }
   .card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px;
           margin-bottom:14px; }
   .card h2 { font-size:15px; margin:0 0 2px; }
@@ -57,6 +60,10 @@
     <div class="bar">
       <select id="course" autocomplete="off"></select>
       <select id="who" autocomplete="off"></select>
+      <!-- The cache is invisible, so the escape from it must not be. A silent TTL would be the
+           worst of both: too short to help somebody comparing courses, too long for somebody
+           who has just changed something. -->
+      <button id="refresh" title="Re-read this course from the sheets">Refresh</button>
     </div>
     <div id="body"></div>
   </div>
@@ -80,7 +87,20 @@
   // does not guarantee they return in order. Without this the slower first response repaints
   // over the second — the panel showing correct content, then replacing it with stale content,
   // which looks exactly like an unexplained reload.
-  var state = { idToken: null, course: null, seq: 0, shown: null };
+  // `boot` caches one bootstrap response per course, for this tab only.
+  //
+  // Switching BACK to a course already viewed was costing a full round trip — one to two
+  // seconds of Apps Script overhead plus a second spreadsheet open for the register — to
+  // redraw data the tab already had. That is the "switching courses again is slow" complaint.
+  //
+  // Deliberately client-side rather than CacheService. A server cache would need the identity
+  // in its key, and getting that wrong serves one instructor another's view. This lives in one
+  // tab, for one signed-in user, and dies on reload — there is no key to get wrong.
+  //
+  // `who` is the address the cache belongs to: Google Identity can hand back a different
+  // account on re-auth, and a cache surviving that is the one way this could reproduce the
+  // cross-user fault it was chosen to avoid.
+  var state = { idToken: null, course: null, seq: 0, shown: null, boot: {}, who: null };
 
   // Same shape as pass.js: text/plain avoids a CORS preflight, which Apps Script cannot answer.
   // Counts and names every call, so a duplicate can be identified rather than guessed at.
@@ -266,7 +286,7 @@
     state.shown = null;                 // the panel below is about to be about a different course
 
     // One call again: volunteers AND the student list for the new course.
-    api({ action: 'facultyBootstrap', course: state.course }).then(function (r) {
+    bootstrap(state.course).then(function (r) {
       // The option-building that stood here moved into paint(), which now runs for both the
       // first load and every course change. Two copies of the same markup is how one of them
       // ends up carrying a fix the other does not.
@@ -290,13 +310,25 @@
     show(studentsView({ students: r.students }));
   }
 
+  function bootstrap(course, force) {
+    if (!force && course && state.boot[course]) {
+      try { console.debug('[period-pass] bootstrap cache hit ' + course); } catch (e) {}
+      return Promise.resolve(state.boot[course]);
+    }
+    return api({ action: 'facultyBootstrap', course: course || undefined })
+      .then(function (r) {
+        if (r.ok) state.boot[r.course] = r;
+        return r;
+      });
+  }
+
   function start() {
     try { console.debug('[period-pass] start()'); } catch (e) {}
     // ONE round trip for the whole first paint. Courses, volunteers and students used to be
     // three sequential calls, each waiting on the last, and the Apps Script round trip — POST,
     // 302, GET /echo, script invocation — is one to two seconds every time regardless of the
     // handler. That sequence was the latency, not the reads.
-    api({ action: 'facultyBootstrap' }).then(function (r) {
+    bootstrap(null, true).then(function (r) {
       if (!r.ok) {
         $('signin').classList.remove('hidden');
         $('signinError').textContent = r.message || 'Not listed as faculty for any course.';
@@ -321,6 +353,11 @@
       // in step even if the browser restores something else.
       state.course = $('course').value || r.course;
 
+      $('refresh').onclick = function () {
+        delete state.boot[state.course];
+        state.shown = null;
+        loadWho();
+      };
       $('course').onchange = function () {
         // Idempotent. A change event that does not change anything must not cost two requests,
         // whatever fired it — restoration, autofill, or a browser reissuing form state on
@@ -349,6 +386,16 @@
   function onCredential(resp) {
     try { console.debug('[period-pass] credential callback, started=' + started); } catch (e) {}
     state.idToken = resp.credential;
+
+    // A different account in the same tab must not see the previous one's cached views. The
+    // address is read from the token payload rather than trusted for anything — it is only
+    // being compared with itself.
+    try {
+      var who = JSON.parse(atob(resp.credential.split('.')[1].replace(/-/g, '+')
+        .replace(/_/g, '/'))).email || null;
+      if (state.who && who !== state.who) { state.boot = {}; state.shown = null; }
+      state.who = who;
+    } catch (e) { state.boot = {}; }     // unreadable token: discard rather than assume
     if (started) return;
     started = true;
     start();
