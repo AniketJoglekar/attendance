@@ -265,28 +265,38 @@
     w.innerHTML = '<option>Loading volunteers\u2026</option>';
     state.shown = null;                 // the panel below is about to be about a different course
 
-    api({ action: 'facultyVolunteers', course: state.course }).then(function (r) {
-      var opts = '<option value="__students">All students</option>';
-      if (r.ok) {
-        opts += r.volunteers.map(function (v) {
-          return '<option value="' + esc(v.volunteer) + '">' + esc(v.volunteer) +
-            (v.level !== 'normal' ? ' \u2014 ' + esc(v.level) : '') + '</option>';
-        }).join('');
-      }
-      // Assigned BEFORE the handler is attached, so replacing the options cannot leave a
-      // half-built select visible while a load is already running against it.
-      w.innerHTML = opts;
-      w.disabled = false;
-      w.onchange = function () { load(); };
-      // force: this is a new course, so the panel must redraw even if the volunteer selection
-      // happens to carry the same value as before.
-      load(true);
+    // One call again: volunteers AND the student list for the new course.
+    api({ action: 'facultyBootstrap', course: state.course }).then(function (r) {
+      // The option-building that stood here moved into paint(), which now runs for both the
+      // first load and every course change. Two copies of the same markup is how one of them
+      // ends up carrying a fix the other does not.
+      if (!r.ok) { show('<p class="muted">' + esc(r.message) + '</p>'); return; }
+      paint(r);
     });
+  }
+
+  // Fills the volunteer select and paints the panel from data already in hand — no request.
+  function paint(r) {
+    var w = $('who');
+    w.innerHTML = '<option value="__students">All students</option>' +
+      r.volunteers.map(function (v) {
+        return '<option value="' + esc(v.volunteer) + '">' +
+          esc(v.label || v.volunteer) +
+          (v.level !== 'normal' ? ' \u2014 ' + esc(v.level) : '') + '</option>';
+      }).join('');
+    w.disabled = false;
+    w.onchange = function () { load(); };
+    state.shown = state.course + '|__students';
+    show(studentsView({ students: r.students }));
   }
 
   function start() {
     try { console.debug('[period-pass] start()'); } catch (e) {}
-    api({ action: 'facultyCourses' }).then(function (r) {
+    // ONE round trip for the whole first paint. Courses, volunteers and students used to be
+    // three sequential calls, each waiting on the last, and the Apps Script round trip — POST,
+    // 302, GET /echo, script invocation — is one to two seconds every time regardless of the
+    // handler. That sequence was the latency, not the reads.
+    api({ action: 'facultyBootstrap' }).then(function (r) {
       if (!r.ok) {
         $('signin').classList.remove('hidden');
         $('signinError').textContent = r.message || 'Not listed as faculty for any course.';
@@ -296,7 +306,8 @@
       $('signin').classList.add('hidden');
       $('app').classList.remove('hidden');
       $('course').innerHTML = r.courses.map(function (c) {
-        return '<option value="' + esc(c.code) + '">' + esc(c.code) +
+        return '<option value="' + esc(c.code) + '"' +
+          (c.code === r.course ? ' selected' : '') + '>' + esc(c.code) +
           (c.title ? ' \u2014 ' + esc(c.title) : '') + '</option>';
       }).join('');
       // Read the select AFTER the options exist, rather than assuming the first one.
@@ -306,7 +317,9 @@
       // CY104L while the select said PH104L; the restoration then fired change, the handler
       // reloaded everything, and the page fetched volunteers and students twice — the second
       // pair being what looked like the list reloading after it had already appeared.
-      state.course = $('course').value || r.courses[0].code;
+      // The server already chose, and marked it selected above. Reading it back keeps the two
+      // in step even if the browser restores something else.
+      state.course = $('course').value || r.course;
 
       $('course').onchange = function () {
         // Idempotent. A change event that does not change anything must not cost two requests,
@@ -316,6 +329,7 @@
         state.course = this.value;
         loadWho();
       };
+      paint(r);
       // `who`'s handler is attached in loadWho, next to the options it belongs with. Assigning
       // it here as well was harmless — assignment overwrites rather than accumulating, unlike
       // addEventListener — but two lines claiming the same responsibility is how one of them

@@ -197,24 +197,45 @@
   function coursesView() {
     show('<select id="course" autocomplete="off"></select><select id="who" autocomplete="off" style="margin-left:10px"></select>' +
          '<div id="panel"></div>');
-    api({ action: 'officeCourses' }).then(function (r) {
+    // ONE round trip: courses, volunteers and students together. See faculty.html — each Apps
+    // Script call costs one to two seconds of round trip regardless of the handler, and three
+    // in sequence was the latency.
+    api({ action: 'officeBootstrap' }).then(function (r) {
       if (!r.ok) return show('<p class="muted">' + esc(r.message) + '</p>');
       $('course').innerHTML = r.courses.map(function (c) {
-        return '<option value="' + esc(c.code) + '">' + esc(c.code) +
+        return '<option value="' + esc(c.code) + '"' +
+          (c.code === r.course ? ' selected' : '') + '>' + esc(c.code) +
           (c.title ? ' \u2014 ' + esc(c.title) : '') +
           (c.faculty ? '' : ' (no faculty listed)') + '</option>';
       }).join('');
       // See faculty.html: read the select after the options exist, and ignore a change event
       // that changes nothing. Chrome's form restoration fires one, and it cost two extra
       // round trips per page load.
-      state.course = $('course').value || (r.courses.length ? r.courses[0].code : null);
+      state.course = $('course').value || r.course;
       $('course').onchange = function () {
         if (this.value === state.course) return;
         state.course = this.value;
         loadWho();
       };
-      loadWho();
+      paint(r);
     });
+  }
+
+  /** Fills the volunteer select and the panel from data already in hand — no request. */
+  function paint(r) {
+    var w = $('who');
+    w.innerHTML = '<option value="__students">All students</option>' +
+      r.volunteers.map(function (v) {
+        // value = the key the LOGS use; text = something a person can read. The two differ
+        // because Recorded by holds a name, not an address.
+        return '<option value="' + esc(v.volunteer) + '">' +
+          esc(v.label || v.volunteer) +
+          (v.level !== 'normal' ? ' \u2014 ' + esc(v.level) : '') + '</option>';
+      }).join('');
+    w.disabled = false;
+    w.onchange = function () { loadPanel(); };
+    state.shown = state.course + '|__students';
+    $('panel').innerHTML = studentsView({ students: r.students });
   }
 
   // The OFFICE variants, not the faculty ones. Same underlying data; a different gate, because
@@ -228,16 +249,12 @@
     w.innerHTML = '<option>Loading volunteers\u2026</option>';
     state.shown = null;
 
-    api({ action: 'officeVolunteers', course: state.course }).then(function (r) {
+    // One call again: volunteers AND the student list for the new course. The option-building
+    // that stood here lives in paint(), which serves both the first load and every course
+    // change — two copies of the same markup is how one ends up carrying a fix the other does not.
+    api({ action: 'officeBootstrap', course: state.course }).then(function (r) {
       if (!r.ok) { $('panel').innerHTML = '<p class="muted">' + esc(r.message) + '</p>'; return; }
-      $('who').innerHTML = '<option value="__students">All students</option>' +
-        r.volunteers.map(function (v) {
-          return '<option value="' + esc(v.volunteer) + '">' + esc(v.volunteer) +
-            (v.level !== 'normal' ? ' \u2014 ' + esc(v.level) : '') + '</option>';
-        }).join('');
-      w.disabled = false;
-      w.onchange = function () { loadPanel(); };
-      loadPanel(true);      // new course: redraw even if the volunteer value is unchanged
+      paint(r);
     });
   }
 
