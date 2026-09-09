@@ -321,7 +321,24 @@
     w.disabled = false;
     w.onchange = function () { load(); };
     state.shown = state.course + '|__students';
+    state.students = r.students;
     show(studentsView({ students: r.students }));
+
+    // Attendance arrives AFTER the list is on screen. It is the only part that needs the
+    // register spreadsheet opened, which measured 490-833ms of a ~6.5s request — worth nobody
+    // waiting for, when names and risk levels are what the page is for.
+    if (!r.attendanceLoaded) {
+      api({ action: 'facultyAttendance', course: state.course }).then(function (a) {
+        if (!a.ok || state.shown !== state.course + '|__students') return;
+        r.attendanceLoaded = true;
+        r.students.forEach(function (st) {
+          var v = a.attendance[st.roll];
+          if (!v) return;
+          st.attendancePct = v.percent; st.present = v.present; st.held = v.held;
+        });
+        show(studentsView({ students: r.students }));
+      });
+    }
   }
 
   function bootstrap(course, force) {
